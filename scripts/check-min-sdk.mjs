@@ -32,6 +32,17 @@ const FLOOR_PACKAGES = [`${SCOPE}/pi-coding-agent`, `${SCOPE}/pi-ai`, `${SCOPE}/
 const scopeDir = path.join(repoRoot, "node_modules", SCOPE);
 const stashDir = path.join(repoRoot, "node_modules", `${SCOPE}.real`);
 
+function linkFloorScope(target) {
+  // Directory symlinks require SeCreateSymbolicLinkPrivilege on Windows.
+  // Junctions provide the same path substitution for this local probe and
+  // work for ordinary developer accounts without enabling Developer Mode.
+  if (process.platform === "win32") {
+    symlinkSync(target, scopeDir, "junction");
+  } else {
+    symlinkSync(target, scopeDir);
+  }
+}
+
 function restore() {
   // Idempotent: safe to call from the finally block and from signal handlers.
   try {
@@ -67,20 +78,29 @@ try {
   writeFileSync(path.join(scratch, "package.json"), `${JSON.stringify({ name: "min-sdk-probe", private: true })}\n`);
   const specs = FLOOR_PACKAGES.map((name) => `${name}@${floor}`);
   console.log(`Installing ${specs.join(" ")} ...`);
-  execFileSync("npm", ["install", "--silent", "--no-audit", "--no-fund", "--no-package-lock", ...specs], {
+  const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+  execFileSync(npmCommand, ["install", "--silent", "--no-audit", "--no-fund", "--no-package-lock", ...specs], {
     cwd: scratch,
     stdio: ["ignore", "ignore", "inherit"],
+    shell: process.platform === "win32",
   });
 
   // Swap the scope in place so the project's own tsconfig applies unchanged —
   // no divergent probe config that could drift from what `npm run check` uses.
   renameSync(scopeDir, stashDir);
-  symlinkSync(path.join(scratch, "node_modules", SCOPE), scopeDir);
+  linkFloorScope(path.join(scratch, "node_modules", SCOPE));
 
   console.log("Type-checking src against the minimum SDK ...");
-  execFileSync(path.join(repoRoot, "node_modules", ".bin", "tsc"), ["--noEmit"], {
+  const tscCommand = path.join(
+    repoRoot,
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "tsc.cmd" : "tsc",
+  );
+  execFileSync(tscCommand, ["--noEmit"], {
     cwd: repoRoot,
     stdio: "inherit",
+    shell: process.platform === "win32",
   });
   console.log(`OK — src type-checks against ${SCOPE}/pi-coding-agent@${floor}`);
 } catch (error) {

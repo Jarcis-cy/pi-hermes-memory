@@ -22,6 +22,9 @@ export const DEFAULT_FLUSH_MIN_TURNS = 6;
 export const DEFAULT_NUDGE_TOOL_CALLS = 15;
 export const DEFAULT_REVIEW_RECENT_MESSAGES = 0;
 export const DEFAULT_FLUSH_RECENT_MESSAGES = 0;
+export const DEFAULT_CONCRETION_REVIEW_THRESHOLD = 10;
+export const DEFAULT_CONCRETION_EVENT_BATCH_SIZE = 100;
+export const DEFAULT_PRINCIPLE_CHAR_LIMIT = 5000;
 /**
  * A consolidation run pays child-process boot plus a full LLM turn, which
  * routinely exceeds 60s — at the old 60s default the auto path was killed
@@ -36,6 +39,7 @@ export const DEFAULT_FAILURE_INJECTION_MAX_ENTRIES = 5;
 export const MEMORY_FILE = "MEMORY.md";
 export const USER_FILE = "USER.md";
 export const STANDING_FILE = "STANDING.md";
+export const PRINCIPLES_FILE = "PRINCIPLES.md";
 
 // ─── Standing instructions (#121) ───
 // A hard budget, deliberately separate from memoryCharLimit/userCharLimit.

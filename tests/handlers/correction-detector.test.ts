@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseManager } from "../../src/store/db.js";
-import { getMemories } from "../../src/store/sqlite-memory-store.js";
+import { getMemoryEvents } from "../../src/store/event-memory-store.js";
 import { MemoryStore } from "../../src/store/memory-store.js";
 import { registerMemoryTool } from "../../src/tools/memory-tool.js";
 import { isCorrection, setupCorrectionDetector } from "../../src/handlers/correction-detector.js";
@@ -418,6 +418,23 @@ describe("setupCorrectionDetector handler", () => {
     assert.strictEqual(execCalls.length, firstCallCount, "second correction should be rate-limited");
   });
 
+  it("records the message_end correction even when the branch snapshot is empty", async () => {
+    const pi = createMockPi();
+    const correctionStore = new MemoryStore({ ...config, memoryDir: tmpDir } as any);
+    await correctionStore.loadFromDisk();
+    setupCorrectionDetector(pi, correctionStore, null, config, dbManager);
+
+    fireMessageEnd("user", "no, use pnpm instead");
+    await fireTurnEnd([]);
+
+    const events = getMemoryEvents(dbManager);
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].evidenceQuote, "no, use pnpm instead");
+    assert.match(events[0].content, /use pnpm instead/);
+    assert.strictEqual(execCalls.length, 0);
+    assert.strictEqual(correctionStore.getFailureEntries().length, 0);
+  });
+
   it("syncs direct correction saves into SQLite", async () => {
     const pi = createMockPi();
     const correctionStore = new MemoryStore({ ...config, memoryDir: tmpDir } as any);
@@ -434,11 +451,14 @@ describe("setupCorrectionDetector handler", () => {
     fireMessageEnd("user", "no, use pnpm instead");
     await fireTurnEnd(branch);
 
-    const failures = getMemories(dbManager, { target: 'failure' });
-    assert.strictEqual(failures.length, 1);
-    assert.match(failures[0].content, /use pnpm instead/);
-    assert.strictEqual(failures[0].category, 'correction');
-    assert.strictEqual(failures[0].project, null);
+    const events = getMemoryEvents(dbManager);
+    assert.strictEqual(events.length, 1);
+    assert.match(events[0].content, /use pnpm instead/);
+    assert.strictEqual(events[0].kind, 'correction');
+    assert.strictEqual(events[0].scope, 'user');
+    assert.strictEqual(events[0].project, null);
+    assert.strictEqual(events[0].source, 'correction');
+    assert.strictEqual(events[0].evidenceQuote, 'no, use pnpm instead');
   });
 
   it("saves the latest user message as the correction failure", async () => {
@@ -484,15 +504,18 @@ describe("setupCorrectionDetector handler", () => {
     fireMessageEnd("user", "no, use pnpm in this repo");
     await fireTurnEnd(branch);
 
-    const projectFailures = getMemories(dbManager, { target: 'failure', project: 'project-a' });
-    assert.strictEqual(projectFailures.length, 1);
-    assert.match(projectFailures[0].content, /use pnpm in this repo/);
-    assert.doesNotMatch(projectFailures[0].content, /Project: project-a/);
-    assert.strictEqual(projectFailures[0].category, 'correction');
-    assert.strictEqual(getMemories(dbManager, { target: 'failure', project: null }).length, 0);
+    const projectEvents = getMemoryEvents(dbManager, { project: 'project-a' });
+    assert.strictEqual(projectEvents.length, 1);
+    assert.match(projectEvents[0].content, /use pnpm in this repo/);
+    assert.doesNotMatch(projectEvents[0].content, /Project: project-a/);
+    assert.strictEqual(projectEvents[0].kind, 'correction');
+    assert.strictEqual(projectEvents[0].scope, 'project');
+    assert.strictEqual(projectEvents[0].source, 'correction');
+    assert.strictEqual(projectEvents[0].evidenceQuote, 'no, use pnpm in this repo');
+    assert.strictEqual(getMemoryEvents(dbManager, { project: null }).length, 0);
   });
 
-  it("does not break correction handling when SQLite sync fails", async () => {
+  it("warns and does not pollute core memory when episodic storage fails", async () => {
     const pi = createMockPi();
     const correctionStore = new MemoryStore({ ...config, memoryDir: tmpDir } as any);
     await correctionStore.loadFromDisk();
@@ -514,8 +537,12 @@ describe("setupCorrectionDetector handler", () => {
     fireMessageEnd("user", "no, use yarn instead");
     await fireTurnEnd(branch);
 
-    assert.ok(execCalls.length >= 1, 'correction review should still run');
-    assert.strictEqual(correctionStore.getFailureEntries().length, 1, 'Markdown correction save should still happen');
+    assert.strictEqual(execCalls.length, 0, 'event mode must not fall back to a core-memory subprocess');
+    assert.strictEqual(correctionStore.getFailureEntries().length, 0, 'event mode must not write the correction into legacy core memory');
+    assert.deepStrictEqual(
+      notifyCalls.filter((entry) => entry.msg.includes('episodic memory could not be recorded')),
+      [{ msg: 'Correction detected, but episodic memory could not be recorded.', level: 'warning' }],
+    );
   });
 
   describe("direct memory completion transport", () => {

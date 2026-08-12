@@ -16,6 +16,7 @@ import type { MemoryConfig } from "../types.js";
 import { collectMessageParts } from "./message-parts.js";
 import { execChildPrompt } from "./pi-child-process.js";
 import { runDirectMemoryCompletion, usesDirectTransport } from "./review-memory-ops.js";
+import { extractAndCaptureEvents } from "./event-extraction.js";
 import { resolveProjectName, resolveProjectStore, type ProjectNameRef, type ProjectStoreRef } from "../project-context.js";
 
 function buildDirectFlushUserPrompt(
@@ -55,10 +56,14 @@ export function setupSessionFlush(
   config: MemoryConfig,
   dbManager: DatabaseManager | null = null,
   projectName: ProjectNameRef = null,
-  deps: { runDirectMemoryCompletion?: typeof runDirectMemoryCompletion } = {},
+  deps: {
+    runDirectMemoryCompletion?: typeof runDirectMemoryCompletion;
+    extractAndCaptureEvents?: typeof extractAndCaptureEvents;
+  } = {},
 ): void {
   let userTurnCount = 0;
   const runDirect = deps.runDirectMemoryCompletion ?? runDirectMemoryCompletion;
+  const captureEvents = deps.extractAndCaptureEvents ?? extractAndCaptureEvents;
 
   pi.on("message_end", async (event, _ctx) => {
     if (event.message.role === "user") userTurnCount++;
@@ -82,6 +87,26 @@ export function setupSessionFlush(
     const parts = collectMessageParts(entries, config.flushRecentMessages);
     const activeProjectStore = resolveProjectStore(projectStore);
     const activeProjectName = resolveProjectName(projectName);
+
+    if (config.eventMemoryEnabled !== false && dbManager) {
+      const sessionManager = ctx.sessionManager as typeof ctx.sessionManager & {
+        getHeader?: () => { id?: string } | null;
+      };
+      await captureEvents(
+        pi,
+        ctx,
+        dbManager,
+        config,
+        {
+          parts,
+          projectName: activeProjectName,
+          source: "session-flush",
+          sourceSessionId: sessionManager.getHeader?.()?.id ?? null,
+        },
+        { timeoutMs, signal },
+      );
+      return;
+    }
 
     if (usesDirectTransport(config)) {
       try {
@@ -128,11 +153,10 @@ export function setupSessionFlush(
     await flush(ctx, event.signal, 30000);
   });
 
-  // Flush before session shutdown (must be fast, non-blocking)
+  // Flush before session shutdown. Await the bounded flush so the final DB
+  // close cannot race an event capture still running in the background.
   pi.on("session_shutdown", async (event, ctx) => {
     if (!config.flushOnShutdown) return;
-    // Fire-and-forget with a short timeout so we don't block Pi's shutdown.
-    // We intentionally do NOT await — Pi should not wait for the child process.
-    flush(ctx, undefined, 10000).catch(() => {});
+    await flush(ctx, undefined, 10000);
   });
 }

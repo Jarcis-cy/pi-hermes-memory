@@ -20,6 +20,8 @@ interface ExecChildPromptOptions {
   signal?: AbortSignal;
   timeoutMs: number;
   retryWithoutOverrides?: boolean;
+  /** Run the child as a JSON-only reasoning call with no tools or ambient skills/context. */
+  jsonOnly?: boolean;
 }
 
 interface ExecChildPromptDependencies {
@@ -394,6 +396,12 @@ async function writePromptToTemporaryFile(prompt: string): Promise<{ dir: string
   }
 }
 
+function isolateJsonOnlyArgs(args: string[], enabled: boolean | undefined): string[] {
+  if (!enabled || args.length === 0) return args;
+  const prompt = args[args.length - 1];
+  return [...args.slice(0, -1), "--no-tools", "--no-skills", "--no-context-files", prompt];
+}
+
 export async function execChildPrompt(
   pi: Pick<ExtensionAPI, "exec">,
   prompt: string,
@@ -416,7 +424,10 @@ export async function execChildPrompt(
   try {
     try {
       const invocation = resolveWatchedChildPiInvocation(
-        resolveChildPiInvocation(buildChildPiPromptArgs(promptReference, config)),
+        resolveChildPiInvocation(isolateJsonOnlyArgs(
+          buildChildPiPromptArgs(promptReference, config),
+          options.jsonOnly,
+        )),
         options.timeoutMs,
         cancellationPath,
       );
@@ -440,7 +451,10 @@ export async function execChildPrompt(
     }
 
     const retryInvocation = resolveWatchedChildPiInvocation(
-      resolveChildPiInvocation(basePromptArgs(promptReference, config)),
+      resolveChildPiInvocation(isolateJsonOnlyArgs(
+        basePromptArgs(promptReference, config),
+        options.jsonOnly,
+      )),
       options.timeoutMs,
       cancellationPath,
     );

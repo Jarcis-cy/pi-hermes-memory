@@ -19,7 +19,7 @@
   "scripts": {
     "check": "node scripts/ensure-dev.mjs check && tsc --noEmit",
     "check:min-sdk": "node scripts/ensure-dev.mjs check && node scripts/check-min-sdk.mjs",
-    "test": "node scripts/ensure-dev.mjs test && tests/run-all.sh"
+    "test": "node scripts/ensure-dev.mjs test && bash tests/run-all.sh"
   },
   "keywords": [
     "pi-package",

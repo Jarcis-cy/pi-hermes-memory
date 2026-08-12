@@ -6,6 +6,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { MemoryStore } from "../store/memory-store.js";
 import type { StandingInstructions } from "../store/standing-instructions.js";
+import type { DatabaseManager } from "../store/db.js";
+import { renderAdaptivePrinciples } from "../store/event-memory-store.js";
 import { resolveMemoryPolicyPrompt } from "../prompt-context.js";
 import type { MemoryConfig } from "../types.js";
 import { resolveProjectName, resolveProjectStore, type ProjectNameRef, type ProjectStoreRef } from "../project-context.js";
@@ -27,8 +29,11 @@ export function registerPreviewContextCommand(
   store: MemoryStore,
   projectStore: ProjectStoreRef,
   projectName: ProjectNameRef,
-  config: Pick<MemoryConfig, "memoryMode" | "memoryPolicyStyle" | "memoryPolicyCustomText"> = { memoryMode: "policy-only" },
+  config: Pick<MemoryConfig,
+    "memoryMode" | "memoryPolicyStyle" | "memoryPolicyCustomText" | "principleInjectionEnabled"
+  > = { memoryMode: "policy-only" },
   standing: StandingInstructions | null = null,
+  dbManager: DatabaseManager | null = null,
 ): void {
   pi.registerCommand("memory-preview-context", {
     description: "Preview the memory policy or legacy memory context blocks",
@@ -53,6 +58,15 @@ export function registerPreviewContextCommand(
           lines.push("");
         } else {
           lines.push("  No memory policy context is injected for this policy style.");
+          lines.push("");
+        }
+        const principleBlock = config.principleInjectionEnabled !== false && dbManager
+          ? renderAdaptivePrinciples(dbManager, resolveProjectName(projectName))
+          : "";
+        if (principleBlock) {
+          blockCount++;
+          lines.push("  ── ADAPTIVE PRINCIPLES (always injected) ───────────────────");
+          lines.push(principleBlock);
           lines.push("");
         }
         blockCount += appendStandingBlock(lines, standing);
@@ -88,6 +102,15 @@ export function registerPreviewContextCommand(
         lines.push(`  ── PROJECT MEMORY (${activeProjectName ?? ""}) ─────────────────────────`);
         lines.push(projectBlock);
         lines.push("");
+      }
+      if (config.principleInjectionEnabled !== false && dbManager) {
+        const principleBlock = renderAdaptivePrinciples(dbManager, activeProjectName);
+        if (principleBlock) {
+          blockCount++;
+          lines.push("  ── ADAPTIVE PRINCIPLES (always injected) ───────────────────");
+          lines.push(principleBlock);
+          lines.push("");
+        }
       }
 
       blockCount += appendStandingBlock(lines, standing);

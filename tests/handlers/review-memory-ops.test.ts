@@ -14,6 +14,7 @@ import {
 } from "../../src/handlers/review-memory-ops.js";
 import { DatabaseManager } from "../../src/store/db.js";
 import { getMemories, reconcileMarkdownMemoryScope } from "../../src/store/sqlite-memory-store.js";
+import { AtomicLockCoordinator } from "../../src/store/atomic-lock-coordinator.js";
 
 function mockModel(reasoning: boolean): Model<Api> {
   return {
@@ -249,6 +250,7 @@ describe("applyReviewOperations", () => {
   });
 
   afterEach(async () => {
+    AtomicLockCoordinator.closeShared(path.join(tmpDir, ".pi-hermes-locks.sqlite"));
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 

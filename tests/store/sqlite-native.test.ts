@@ -11,6 +11,9 @@ import {
 } from "../../src/store/sqlite-native.js";
 
 const require = createRequire(import.meta.url);
+const fakePackageRoot = path.dirname(path.dirname(path.join(
+  "/tmp/fake-npm/node_modules/better-sqlite3/lib/index.js",
+)));
 
 type RequireCache = Record<string, unknown>;
 
@@ -85,7 +88,7 @@ describe("sqlite-native loader", () => {
       requireImpl: req,
       rebuild: (packageRoot) => {
         rebuilt = true;
-        assert.equal(packageRoot, "/tmp/fake-npm/node_modules/better-sqlite3");
+        assert.equal(packageRoot, fakePackageRoot);
         return { ok: true, detail: "rebuilt" };
       },
     });
@@ -118,7 +121,7 @@ describe("sqlite-native loader", () => {
         assert.match(message, /npm rebuild better-sqlite3/);
         assert.match(message, /Homebrew/);
         assert.match(message, /npm missing/);
-        assert.equal(error.packageRoot, "/tmp/fake-npm/node_modules/better-sqlite3");
+        assert.equal(error.packageRoot, fakePackageRoot);
         return true;
       },
     );

@@ -1,6 +1,8 @@
 import { MEMORY_POLICY_PROMPT, MEMORY_POLICY_PROMPT_COMPACT } from "./constants.js";
 import type { MemoryConfig } from "./types.js";
 import type { MemoryStore } from "./store/memory-store.js";
+import type { DatabaseManager } from "./store/db.js";
+import { renderAdaptivePrinciples } from "./store/event-memory-store.js";
 import type { StandingInstructions } from "./store/standing-instructions.js";
 
 type MemoryPolicyConfig = Pick<MemoryConfig, "memoryPolicyStyle" | "memoryPolicyCustomText">;
@@ -36,11 +38,21 @@ export async function buildPromptContext(
   projectStore: MemoryStore | null,
   projectName: string,
   standing: StandingInstructions | null = null,
+  dbManager: DatabaseManager | null = null,
+  principleInjectionEnabled = true,
 ): Promise<string> {
   const standingBlock = standing?.formatForSystemPrompt() ?? "";
+  let principleBlock = "";
+  if (principleInjectionEnabled && dbManager) {
+    try {
+      principleBlock = renderAdaptivePrinciples(dbManager, projectName || null);
+    } catch {
+      // Persistent-memory availability must not block an otherwise healthy agent run.
+    }
+  }
 
   if (config.memoryMode === "policy-only") {
-    return [resolveMemoryPolicyPrompt(config), standingBlock].filter(Boolean).join("\n\n");
+    return [resolveMemoryPolicyPrompt(config), principleBlock, standingBlock].filter(Boolean).join("\n\n");
   }
 
   const memoryBlock = store.formatForSystemPrompt();
@@ -49,6 +61,7 @@ export async function buildPromptContext(
   const parts: string[] = [];
   if (memoryBlock) parts.push(memoryBlock);
   if (projectBlock) parts.push(projectBlock);
+  if (principleBlock) parts.push(principleBlock);
   if (standingBlock) parts.push(standingBlock);
 
   return parts.join("\n\n");

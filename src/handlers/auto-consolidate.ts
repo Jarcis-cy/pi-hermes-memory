@@ -126,6 +126,7 @@ async function acquireConsolidationLock(
       release: async () => {
         clearInterval(heartbeat);
         held.release();
+        AtomicLockCoordinator.closeShared(path.join(root, "locks.sqlite"));
       },
     },
     contended,

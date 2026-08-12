@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { DatabaseManager, SQLITE_BUSY_TIMEOUT_MS, SQLITE_WAL_AUTOCHECKPOINT_PAGES } from '../../src/store/db.js';
 import { AtomicLockCoordinator } from '../../src/store/atomic-lock-coordinator.js';
+import { canonicalStoragePathSync } from '../../src/store/canonical-storage-path.js';
 
 describe('DatabaseManager', () => {
   let tmpDir: string;
@@ -19,6 +20,8 @@ describe('DatabaseManager', () => {
 
   afterEach(() => {
     dbManager.close();
+    const canonicalDbPath = canonicalStoragePathSync(path.join(tmpDir, 'sessions.db'));
+    AtomicLockCoordinator.closeShared(path.join(path.dirname(canonicalDbPath), '.pi-hermes-locks.sqlite'));
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -359,13 +362,14 @@ describe('DatabaseManager', () => {
     it('waits for a recovery owner and reuses the healthy database it leaves behind', () => {
       dbManager.getDb();
       dbManager.close();
-      const canonicalDbPath = fs.realpathSync(path.join(tmpDir, 'sessions.db'));
+      const canonicalDbPath = canonicalStoragePathSync(path.join(tmpDir, 'sessions.db'));
       const lockDbPath = path.join(path.dirname(canonicalDbPath), '.pi-hermes-locks.sqlite');
       const lockKey = `recovery:${canonicalDbPath}`;
-      const coordinator = new AtomicLockCoordinator(lockDbPath);
+      const coordinator = AtomicLockCoordinator.shared(lockDbPath);
       const lease = coordinator.tryAcquire(lockKey, { staleMs: 10_000 });
       assert.ok(lease);
-      spawn(process.execPath, [
+      try {
+        spawn(process.execPath, [
         '-e',
         `setTimeout(() => {
           const Database = require('better-sqlite3');
@@ -384,15 +388,18 @@ describe('DatabaseManager', () => {
 
       assert.strictEqual(result.strategy, 'reused');
       assert.ok(Date.now() - started >= 50, 'peer should wait for the active recovery owner');
-      assert.strictEqual(fs.readdirSync(tmpDir).filter((name) => name.startsWith('sessions.db.corrupt-')).length, 0);
+        assert.strictEqual(fs.readdirSync(tmpDir).filter((name) => name.startsWith('sessions.db.corrupt-')).length, 0);
+      } finally {
+        lease.release();
+      }
     });
 
     it('takes over a stale recovery lock', () => {
       dbManager.close();
       fs.writeFileSync(path.join(tmpDir, 'sessions.db'), 'not a sqlite database');
-      const canonicalDbPath = fs.realpathSync(path.join(tmpDir, 'sessions.db'));
+      const canonicalDbPath = canonicalStoragePathSync(path.join(tmpDir, 'sessions.db'));
       const lockDbPath = path.join(path.dirname(canonicalDbPath), '.pi-hermes-locks.sqlite');
-      const coordinator = new AtomicLockCoordinator(lockDbPath);
+      const coordinator = AtomicLockCoordinator.shared(lockDbPath);
       coordinator.tryAcquire('schema-init', { staleMs: 50 })!.release();
       const lockDb = new Database(lockDbPath);
       lockDb.prepare(`
@@ -421,7 +428,7 @@ describe('DatabaseManager', () => {
       prototype.moveDatabaseFilesToBackup = function (this: DatabaseManager, backupBase: string) {
         moveCalls++;
         if (moveCalls === 1) {
-          const canonicalDbPath = fs.realpathSync(path.join(tmpDir, 'sessions.db'));
+          const canonicalDbPath = canonicalStoragePathSync(path.join(tmpDir, 'sessions.db'));
           const lockDbPath = path.join(path.dirname(canonicalDbPath), '.pi-hermes-locks.sqlite');
           const lockKey = `recovery:${canonicalDbPath}`;
           const lockDb = new Database(lockDbPath);
@@ -430,7 +437,7 @@ describe('DatabaseManager', () => {
           } finally {
             lockDb.close();
           }
-          const thief = new AtomicLockCoordinator(lockDbPath);
+          const thief = AtomicLockCoordinator.shared(lockDbPath);
           const stolen = thief.tryAcquire(lockKey, { staleMs: 50 });
           assert.ok(stolen);
           stolen.release();
@@ -711,6 +718,127 @@ describe('DatabaseManager', () => {
         INSERT INTO memories (project, target, content, created, last_referenced)
         VALUES (?, ?, ?, ?, ?)
       `).run(null, 'memory', 'recoverable memory', '2026-05-03', '2026-05-03');
+      db.prepare(`
+        INSERT INTO concretion_runs (
+          id, trigger, status, started_at, completed_at, event_count, principle_count, conflict_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(101, 'manual', 'completed', '2026-05-03T00:00:00Z', '2026-05-03T00:01:00Z', 1, 1, 1);
+      db.prepare(`
+        INSERT INTO memory_events (
+          id, capture_id, project, scope, kind, content, evidence_quote, source,
+          source_session_id, occurred_at, created_at, concreted_at, concretion_run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        201,
+        'recover-capture',
+        'recover-project',
+        'project',
+        'failure',
+        'recoverable event',
+        'event evidence',
+        'manual',
+        'recover-session',
+        '2026-05-03T00:00:00Z',
+        '2026-05-03T00:00:00Z',
+        '2026-05-03T00:01:00Z',
+        101,
+      );
+      const insertPrinciple = db.prepare(`
+        INSERT INTO principles (
+          id, scope, project, content, rationale, status, supersedes_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      insertPrinciple.run(
+        301,
+        'project',
+        'recover-project',
+        'recoverable principle v1',
+        'recovery rationale',
+        'superseded',
+        null,
+        '2026-05-03T00:01:00Z',
+        '2026-05-03T00:01:00Z',
+      );
+      insertPrinciple.run(
+        302,
+        'project',
+        'recover-project',
+        'recoverable principle v2',
+        'recovery rationale',
+        'superseded',
+        301,
+        '2026-05-03T00:02:00Z',
+        '2026-05-03T00:02:00Z',
+      );
+      insertPrinciple.run(
+        303,
+        'project',
+        'recover-project',
+        'recoverable principle v3',
+        'recovery rationale',
+        'active',
+        302,
+        '2026-05-03T00:03:00Z',
+        '2026-05-03T00:03:00Z',
+      );
+      const insertPrincipleSource = db.prepare(
+        'INSERT INTO principle_sources (principle_id, event_id) VALUES (?, ?)',
+      );
+      insertPrincipleSource.run(301, 201);
+      insertPrincipleSource.run(302, 201);
+      insertPrincipleSource.run(303, 201);
+      db.prepare(`
+        INSERT INTO principle_conflicts (
+          id, candidate_scope, candidate_project, candidate_content,
+          conflicting_principle_ids, source_event_ids, reason, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        401,
+        'project',
+        'recover-project',
+        'recoverable conflict candidate',
+        '[301]',
+        '[201]',
+        'recoverable conflict',
+        'pending',
+        '2026-05-03T00:02:00Z',
+      );
+
+      // Simulate partially damaged relationships that remain readable. Recovery
+      // should keep the readable records, preserve valid version history, and
+      // discard only links whose parent rows are gone.
+      db.pragma('foreign_keys = OFF');
+      db.prepare(`
+        INSERT INTO memory_events (
+          id, capture_id, project, scope, kind, content, source,
+          occurred_at, created_at, concretion_run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        202,
+        'recover-dangling-capture',
+        'recover-project',
+        'project',
+        'outcome',
+        'event with a missing concretion run',
+        'manual',
+        '2026-05-03T00:04:00Z',
+        '2026-05-03T00:04:00Z',
+        999,
+      );
+      insertPrinciple.run(
+        304,
+        'project',
+        'recover-project',
+        'readable principle with a missing predecessor',
+        'recovery rationale',
+        'rejected',
+        999,
+        '2026-05-03T00:04:00Z',
+        '2026-05-03T00:04:00Z',
+      );
+      insertPrincipleSource.run(304, 999);
+      db.prepare('UPDATE principle_conflicts SET accepted_principle_id = 999 WHERE id = 401').run();
+      db.pragma('foreign_keys = ON');
       dbManager.close();
 
       corruptRecoverableIndexPage(path.join(tmpDir, 'sessions.db'), 'idx_messages_timestamp');
@@ -725,10 +853,50 @@ describe('DatabaseManager', () => {
         messages: 50,
         session_files: 0,
         memories: 1,
+        concretion_runs: 1,
+        memory_events: 2,
+        principles: 4,
+        principle_sources: 3,
+        principle_conflicts: 1,
       });
-      assert.deepStrictEqual(dbManager.getStats(), { sessions: 1, messages: 50, memories: 1 });
+      assert.deepStrictEqual(dbManager.getStats(), {
+        sessions: 1,
+        messages: 50,
+        memories: 1,
+        events: 2,
+        principles: 1,
+        conflicts: 1,
+      });
       const memory = repairedDb.prepare('SELECT content FROM memories WHERE content = ?').get('recoverable memory') as { content: string } | undefined;
+      const event = repairedDb.prepare('SELECT content FROM memory_events WHERE id = 201').get() as { content: string } | undefined;
+      const danglingEvent = repairedDb.prepare('SELECT concretion_run_id FROM memory_events WHERE id = 202').get() as { concretion_run_id: number | null } | undefined;
+      const principles = repairedDb.prepare(
+        'SELECT id, content, status, supersedes_id FROM principles ORDER BY id',
+      ).all();
+      const sources = repairedDb.prepare(
+        'SELECT principle_id, event_id FROM principle_sources ORDER BY principle_id',
+      ).all();
+      const conflict = repairedDb.prepare(
+        'SELECT candidate_content, accepted_principle_id FROM principle_conflicts WHERE id = 401',
+      ).get() as { candidate_content: string; accepted_principle_id: number | null } | undefined;
       assert.ok(memory);
+      assert.equal(event?.content, 'recoverable event');
+      assert.deepStrictEqual(danglingEvent, { concretion_run_id: null });
+      assert.deepStrictEqual(principles, [
+        { id: 301, content: 'recoverable principle v1', status: 'superseded', supersedes_id: null },
+        { id: 302, content: 'recoverable principle v2', status: 'superseded', supersedes_id: 301 },
+        { id: 303, content: 'recoverable principle v3', status: 'active', supersedes_id: 302 },
+        { id: 304, content: 'readable principle with a missing predecessor', status: 'rejected', supersedes_id: null },
+      ]);
+      assert.deepStrictEqual(sources, [
+        { principle_id: 301, event_id: 201 },
+        { principle_id: 302, event_id: 201 },
+        { principle_id: 303, event_id: 201 },
+      ]);
+      assert.deepStrictEqual(conflict, {
+        candidate_content: 'recoverable conflict candidate',
+        accepted_principle_id: null,
+      });
       assertQuickCheckOk(repairedDb as InstanceType<typeof Database>);
       assert.ok(fs.readdirSync(tmpDir).some((name) => name.startsWith('sessions.db.corrupt-')), 'corrupt DB should be quarantined');
     });
@@ -742,7 +910,14 @@ describe('DatabaseManager', () => {
       const db = dbManager.getDb();
 
       assert.strictEqual(dbManager.getLastRecovery()?.strategy, 'recreated-empty');
-      assert.deepStrictEqual(dbManager.getStats(), { sessions: 0, messages: 0, memories: 0 });
+      assert.deepStrictEqual(dbManager.getStats(), {
+        sessions: 0,
+        messages: 0,
+        memories: 0,
+        events: 0,
+        principles: 0,
+        conflicts: 0,
+      });
       assertQuickCheckOk(db as InstanceType<typeof Database>);
       assert.ok(fs.readdirSync(tmpDir).some((name) => name.startsWith('sessions.db.corrupt-')), 'unrecoverable DB should be quarantined');
     });

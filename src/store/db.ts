@@ -585,6 +585,11 @@ export class DatabaseManager {
       messages: this.copyMessages(source, target),
       session_files: this.copySessionFiles(source, target),
       memories: this.copyMemories(source, target),
+      concretion_runs: this.copyConcretionRuns(source, target),
+      memory_events: this.copyMemoryEvents(source, target),
+      principles: this.copyPrinciples(source, target),
+      principle_sources: this.copyPrincipleSources(source, target),
+      principle_conflicts: this.copyPrincipleConflicts(source, target),
     };
   }
 
@@ -643,6 +648,7 @@ export class DatabaseManager {
         continue;
       }
 
+      if (!this.targetRowExists(target, 'sessions', 'id', row.session_id)) continue;
       insert.run(row.id, row.session_id, row.role, row.content, row.timestamp, this.nullableString(row.tool_calls));
       copied++;
     }
@@ -659,6 +665,7 @@ export class DatabaseManager {
 
     for (const row of this.readTableRows(source, 'session_files', ['path', 'session_id', 'size', 'mtime_ms', 'indexed_at'])) {
       if (typeof row.path !== 'string' || typeof row.session_id !== 'string') continue;
+      if (!this.targetRowExists(target, 'sessions', 'id', row.session_id)) continue;
       insert.run(
         row.path,
         row.session_id,
@@ -717,6 +724,189 @@ export class DatabaseManager {
     return copied;
   }
 
+  private copyConcretionRuns(source: DatabaseLike, target: DatabaseLike): number {
+    const insert = target.prepare(`
+      INSERT OR IGNORE INTO concretion_runs (
+        id, trigger, status, started_at, completed_at, event_count,
+        principle_count, conflict_count, error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    let copied = 0;
+    for (const row of this.readTableRows(source, 'concretion_runs', [
+      'id', 'trigger', 'status', 'started_at', 'completed_at', 'event_count',
+      'principle_count', 'conflict_count', 'error',
+    ])) {
+      const id = this.integerOr(row.id, NaN);
+      if (!Number.isFinite(id) || typeof row.started_at !== 'string') continue;
+      const trigger = row.trigger === 'manual' || row.trigger === 'migration' ? row.trigger : 'automatic';
+      const status = row.status === 'running' || row.status === 'failed' ? row.status : 'completed';
+      insert.run(
+        id,
+        trigger,
+        status,
+        row.started_at,
+        this.nullableString(row.completed_at),
+        this.integerOr(row.event_count, 0),
+        this.integerOr(row.principle_count, 0),
+        this.integerOr(row.conflict_count, 0),
+        this.nullableString(row.error),
+      );
+      copied++;
+    }
+    return copied;
+  }
+
+  private copyMemoryEvents(source: DatabaseLike, target: DatabaseLike): number {
+    const insert = target.prepare(`
+      INSERT OR IGNORE INTO memory_events (
+        id, capture_id, project, scope, kind, content, evidence_quote, source,
+        source_session_id, occurred_at, created_at, concreted_at, concretion_run_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const scopes = new Set(['global', 'user', 'project']);
+    const kinds = new Set(['fact', 'preference', 'correction', 'failure', 'decision', 'outcome', 'insight', 'convention', 'tool-quirk']);
+    const sources = new Set(['background-review', 'correction', 'session-flush', 'legacy-import', 'manual']);
+    let copied = 0;
+    for (const row of this.readTableRows(source, 'memory_events', [
+      'id', 'capture_id', 'project', 'scope', 'kind', 'content', 'evidence_quote',
+      'source', 'source_session_id', 'occurred_at', 'created_at', 'concreted_at',
+      'concretion_run_id',
+    ])) {
+      const id = this.integerOr(row.id, NaN);
+      if (
+        !Number.isFinite(id)
+        || typeof row.capture_id !== 'string'
+        || typeof row.content !== 'string'
+        || typeof row.occurred_at !== 'string'
+        || typeof row.created_at !== 'string'
+      ) continue;
+      const requestedRunId = this.integerOr(row.concretion_run_id, NaN);
+      const concretionRunId = Number.isFinite(requestedRunId)
+        && this.targetRowExists(target, 'concretion_runs', 'id', requestedRunId)
+        ? requestedRunId
+        : null;
+      insert.run(
+        id,
+        row.capture_id,
+        this.nullableString(row.project),
+        typeof row.scope === 'string' && scopes.has(row.scope) ? row.scope : 'global',
+        typeof row.kind === 'string' && kinds.has(row.kind) ? row.kind : 'fact',
+        row.content,
+        this.nullableString(row.evidence_quote),
+        typeof row.source === 'string' && sources.has(row.source) ? row.source : 'manual',
+        this.nullableString(row.source_session_id),
+        row.occurred_at,
+        row.created_at,
+        this.nullableString(row.concreted_at),
+        concretionRunId,
+      );
+      copied++;
+    }
+    return copied;
+  }
+
+  private copyPrinciples(source: DatabaseLike, target: DatabaseLike): number {
+    const insert = target.prepare(`
+      INSERT OR IGNORE INTO principles (
+        id, scope, project, content, rationale, status, supersedes_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+    `);
+    const pendingSupersedes: Array<{ id: number; supersedesId: number }> = [];
+    let copied = 0;
+    for (const row of this.readTableRows(source, 'principles', [
+      'id', 'scope', 'project', 'content', 'rationale', 'status', 'supersedes_id',
+      'created_at', 'updated_at',
+    ])) {
+      const id = this.integerOr(row.id, NaN);
+      if (!Number.isFinite(id) || typeof row.content !== 'string' || typeof row.created_at !== 'string') continue;
+      insert.run(
+        id,
+        row.scope === 'user' || row.scope === 'project' ? row.scope : 'global',
+        this.nullableString(row.project),
+        row.content,
+        this.nullableString(row.rationale),
+        row.status === 'superseded' || row.status === 'rejected' ? row.status : 'active',
+        row.created_at,
+        typeof row.updated_at === 'string' ? row.updated_at : row.created_at,
+      );
+      const supersedesId = this.integerOr(row.supersedes_id, NaN);
+      if (Number.isFinite(supersedesId)) pendingSupersedes.push({ id, supersedesId });
+      copied++;
+    }
+
+    const updateSupersedes = target.prepare('UPDATE principles SET supersedes_id = ? WHERE id = ?');
+    for (const { id, supersedesId } of pendingSupersedes) {
+      if (this.targetRowExists(target, 'principles', 'id', supersedesId)) {
+        updateSupersedes.run(supersedesId, id);
+      }
+    }
+    return copied;
+  }
+
+  private copyPrincipleSources(source: DatabaseLike, target: DatabaseLike): number {
+    const insert = target.prepare('INSERT OR IGNORE INTO principle_sources (principle_id, event_id) VALUES (?, ?)');
+    let copied = 0;
+    for (const row of this.readTableRows(source, 'principle_sources', ['principle_id', 'event_id'])) {
+      const principleId = this.integerOr(row.principle_id, NaN);
+      const eventId = this.integerOr(row.event_id, NaN);
+      if (!Number.isFinite(principleId) || !Number.isFinite(eventId)) continue;
+      if (!this.targetRowExists(target, 'principles', 'id', principleId)) continue;
+      if (!this.targetRowExists(target, 'memory_events', 'id', eventId)) continue;
+      insert.run(principleId, eventId);
+      copied++;
+    }
+    return copied;
+  }
+
+  private copyPrincipleConflicts(source: DatabaseLike, target: DatabaseLike): number {
+    const insert = target.prepare(`
+      INSERT OR IGNORE INTO principle_conflicts (
+        id, candidate_scope, candidate_project, candidate_content,
+        candidate_rationale, conflicting_principle_ids, source_event_ids, reason,
+        status, created_at, resolved_at, resolution, accepted_principle_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    let copied = 0;
+    for (const row of this.readTableRows(source, 'principle_conflicts', [
+      'id', 'candidate_scope', 'candidate_project', 'candidate_content',
+      'candidate_rationale', 'conflicting_principle_ids', 'source_event_ids',
+      'reason', 'status', 'created_at', 'resolved_at', 'resolution',
+      'accepted_principle_id',
+    ])) {
+      const id = this.integerOr(row.id, NaN);
+      if (
+        !Number.isFinite(id)
+        || typeof row.candidate_content !== 'string'
+        || typeof row.conflicting_principle_ids !== 'string'
+        || typeof row.source_event_ids !== 'string'
+        || typeof row.reason !== 'string'
+        || typeof row.created_at !== 'string'
+      ) continue;
+      const requestedPrincipleId = this.integerOr(row.accepted_principle_id, NaN);
+      const acceptedPrincipleId = Number.isFinite(requestedPrincipleId)
+        && this.targetRowExists(target, 'principles', 'id', requestedPrincipleId)
+        ? requestedPrincipleId
+        : null;
+      insert.run(
+        id,
+        row.candidate_scope === 'user' || row.candidate_scope === 'project' ? row.candidate_scope : 'global',
+        this.nullableString(row.candidate_project),
+        row.candidate_content,
+        this.nullableString(row.candidate_rationale),
+        row.conflicting_principle_ids,
+        row.source_event_ids,
+        row.reason,
+        row.status === 'accepted' || row.status === 'rejected' ? row.status : 'pending',
+        row.created_at,
+        this.nullableString(row.resolved_at),
+        this.nullableString(row.resolution),
+        acceptedPrincipleId,
+      );
+      copied++;
+    }
+    return copied;
+  }
+
   private readTableRows(source: DatabaseLike, table: string, desiredColumns: string[]): Iterable<Record<string, unknown>> {
     const columns = this.getColumnNames(source, table);
     const selected = desiredColumns.filter((column) => columns.has(column));
@@ -733,6 +923,18 @@ export class DatabaseManager {
   private getColumnNames(db: DatabaseLike, table: string): Set<string> {
     const rows = db.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all() as { name?: unknown }[];
     return new Set(rows.map((row) => row.name).filter((name): name is string => typeof name === 'string'));
+  }
+
+  private targetRowExists(
+    target: DatabaseLike,
+    table: string,
+    column: string,
+    value: string | number,
+  ): boolean {
+    const row = target.prepare(
+      `SELECT 1 AS present FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(column)} = ? LIMIT 1`,
+    ).get(value) as { present?: number } | undefined;
+    return row?.present === 1;
   }
 
   private nullableString(value: unknown): string | null {
@@ -752,6 +954,7 @@ export class DatabaseManager {
   private rebuildFtsTables(db: DatabaseLike): void {
     db.exec("INSERT INTO message_fts(message_fts) VALUES('rebuild')");
     db.exec("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')");
+    db.exec("INSERT INTO event_fts(event_fts) VALUES('rebuild')");
   }
 
   private corruptBackupBase(): string {
@@ -999,6 +1202,7 @@ export class DatabaseManager {
       try { this.db.close(); } catch { /* best effort — close may throw on a corrupt handle */ }
       this.db = null;
     }
+    AtomicLockCoordinator.closeShared(path.join(path.dirname(this.dbPath), '.pi-hermes-locks.sqlite'));
   }
 
   /**
@@ -1018,15 +1222,21 @@ export class DatabaseManager {
   /**
    * Get stats about the database.
    */
-  getStats(): { sessions: number; messages: number; memories: number } {
+  getStats(): { sessions: number; messages: number; memories: number; events: number; principles: number; conflicts: number } {
     const db = this.getDb();
     const sessions = db.prepare('SELECT COUNT(*) as count FROM sessions').get() as { count: number };
     const messages = db.prepare('SELECT COUNT(*) as count FROM messages').get() as { count: number };
     const memories = db.prepare('SELECT COUNT(*) as count FROM memories').get() as { count: number };
+    const events = db.prepare('SELECT COUNT(*) as count FROM memory_events').get() as { count: number };
+    const principles = db.prepare("SELECT COUNT(*) as count FROM principles WHERE status = 'active'").get() as { count: number };
+    const conflicts = db.prepare("SELECT COUNT(*) as count FROM principle_conflicts WHERE status = 'pending'").get() as { count: number };
     return {
       sessions: sessions.count,
       messages: messages.count,
       memories: memories.count,
+      events: events.count,
+      principles: principles.count,
+      conflicts: conflicts.count,
     };
   }
 }

@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { DatabaseManager } from '../store/db.js';
 import { searchMemories, getMemoryStats } from '../store/sqlite-memory-store.js';
+import { searchMemoryEvents } from '../store/event-memory-store.js';
 import type { MemoryCategory } from '../types.js';
 import { createSharedToolResultRenderer } from './shared-output-view.js';
 import { searchResultView } from './tool-result-views.js';
@@ -18,15 +19,9 @@ export function registerMemorySearchTool(pi: ExtensionAPI, dbManager: DatabaseMa
   pi.registerTool({
     name: 'memory_search',
     label: 'Memory Search',
-    description: `Search extended memory store for relevant entries. Use this when you need context beyond what's in the system prompt — the extended store has unlimited capacity and is searchable.
+    description: `Search persistent memory across the unlimited episodic event ledger and legacy/core memory.
 
-Use cases:
-- Find memories about a specific topic: "What do I know about auth setup?"
-- Search project-specific memories: "What conventions does project X follow?"
-- Find user preferences: "What are the user's testing preferences?"
-- Search for past failures: "memory_search('auth', category='failure')"
-
-Returns matching memory entries with project context and dates.`,
+Use this when you need to recall what happened in a prior task, find the source of a correction or lesson, or retrieve durable user/project context. Episodic results include event IDs, dates, kinds, and evidence quotes. Adaptive principles are already injected when enabled; source events remain searchable here.`,
     promptSnippet: 'Search extended memory store (unlimited capacity)',
     promptGuidelines: [
       'Use memory_search when you need context beyond what is in the system prompt.',
@@ -54,21 +49,54 @@ Returns matching memory entries with project context and dates.`,
       }
 
       const stats = getMemoryStats(dbManager);
-      if (stats.total === 0) {
-        const result: SearchResult = { success: false, message: 'No memories in extended store yet. Use memory_add to store memories.' };
+      const eventStats = dbManager.getStats();
+      if (stats.total === 0 && eventStats.events === 0) {
+        const result: SearchResult = { success: false, message: 'No persistent memories or episodic events have been recorded yet.' };
         return { content: [{ type: 'text' as const, text: result.message! }], details: result };
       }
 
-      const results = searchMemories(dbManager, query, { project, target, category, limit });
+      const eventScope = target === 'user'
+        ? 'user'
+        : target === 'memory'
+          ? (project ? 'project' : 'global')
+          : undefined;
+      const events = category
+        ? searchMemoryEvents(dbManager, query, {
+          project: project === undefined ? undefined : project,
+          scope: eventScope,
+          kind: category,
+          limit,
+        })
+        : searchMemoryEvents(dbManager, query, {
+          project: project === undefined ? undefined : project,
+          scope: eventScope,
+          limit,
+        });
+      const eventContents = new Set(events.map((event) => event.content));
+      const legacyLimit = Math.max(0, limit - events.length);
+      const legacy = legacyLimit === 0
+        ? []
+        : searchMemories(dbManager, query, { project, target, category, limit })
+          .filter((entry) => !eventContents.has(entry.content))
+          .slice(0, legacyLimit);
+      const combinedCount = legacy.length + events.length;
 
-      if (results.length === 0) {
+      if (combinedCount === 0) {
         const result: SearchResult = { success: true, count: 0, message: `No memories found matching "${query}". Try a different search term or broader query.` };
         return { content: [{ type: 'text' as const, text: result.message! }], details: result };
       }
 
-      let output = `Found ${results.length} memories matching "${query}":\n\n`;
+      let output = `Found ${combinedCount} memory result${combinedCount === 1 ? '' : 's'} matching "${query}":\n\n`;
 
-      for (const entry of results) {
+      for (const event of events) {
+        const projectLabel = event.project ? `[${event.project}]` : event.scope === 'user' ? '[user]' : '[global]';
+        output += `📚 E${event.id} ${projectLabel} [${event.kind}] ${event.content}\n`;
+        output += `   Occurred: ${event.occurredAt} | Source: ${event.source}\n`;
+        if (event.evidenceQuote) output += `   Evidence: "${event.evidenceQuote}"\n`;
+        output += `\n`;
+      }
+
+      for (const entry of legacy) {
         const projectLabel = entry.project ? `[${entry.project}]` : '[global]';
         const targetLabel = entry.target === 'user' ? '👤' : entry.target === 'failure' ? '⚠️' : '🧠';
         const categoryLabel = entry.category ? ` [${entry.category}]` : '';
@@ -76,7 +104,7 @@ Returns matching memory entries with project context and dates.`,
         output += `   Created: ${entry.created} | Last used: ${entry.lastReferenced}\n\n`;
       }
 
-      const finalResult: SearchResult = { success: true, count: results.length, output: output.trim() };
+      const finalResult: SearchResult = { success: true, count: combinedCount, output: output.trim() };
       return { content: [{ type: 'text' as const, text: output.trim() }], details: finalResult };
     },
   });

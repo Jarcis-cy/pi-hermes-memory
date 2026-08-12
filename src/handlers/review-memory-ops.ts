@@ -31,6 +31,21 @@ export interface DirectReviewResult {
   error?: string;
 }
 
+export interface DirectJsonResult {
+  ok: boolean;
+  text: string;
+  fallbackReason?: "no_model" | "no_auth" | "aborted" | "provider_error" | "empty";
+  error?: string;
+}
+
+export interface RunDirectJsonCompletionOptions {
+  userPrompt: string;
+  systemPrompt: string;
+  config: Pick<MemoryConfig, "llmModelOverride" | "llmThinkingOverride">;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 export interface RunDirectMemoryCompletionOptions {
   userPrompt: string;
   systemPrompt: string;
@@ -179,7 +194,7 @@ export async function resolveFreshRequestAuth(
   return modelRegistry.getApiKeyAndHeaders(model);
 }
 
-function extractJsonPayload(text: string): unknown {
+export function extractJsonPayload(text: string): unknown {
   const trimmed = text.trim();
   if (!trimmed) return null;
 
@@ -402,7 +417,7 @@ export async function applyReviewOperations(
   return { appliedCount, skippedCount };
 }
 
-function responseText(content: unknown): string {
+export function responseText(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content
     .filter((block): block is { type: "text"; text: string } => (
@@ -410,6 +425,83 @@ function responseText(content: unknown): string {
     ))
     .map((block) => block.text)
     .join("\n");
+}
+
+export async function runDirectJsonCompletion(
+  ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
+  options: RunDirectJsonCompletionOptions,
+  deps: { completeSimple?: typeof completeSimple } = {},
+): Promise<DirectJsonResult> {
+  const complete = deps.completeSimple ?? completeSimple;
+  const model = resolveReviewModel(ctx.model, ctx.modelRegistry, options.config);
+  if (!model) return { ok: false, text: "", fallbackReason: "no_model" };
+
+  const auth = await resolveFreshRequestAuth(ctx.modelRegistry, model);
+  if (!auth.ok || !auth.apiKey) {
+    return {
+      ok: false,
+      text: "",
+      fallbackReason: "no_auth",
+      error: auth.ok ? `No API key for ${model.provider}` : auth.error,
+    };
+  }
+
+  let requestAuth = { apiKey: auth.apiKey, headers: auth.headers, env: auth.env };
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? 120000;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  options.signal?.addEventListener("abort", () => controller.abort(), { once: true });
+  const thinking = effectiveThinkingOverride(options.config);
+  const request = {
+    systemPrompt: options.systemPrompt,
+    messages: [{
+      role: "user" as const,
+      content: [{ type: "text" as const, text: options.userPrompt }],
+      timestamp: Date.now(),
+    }],
+  };
+
+  try {
+    let response;
+    try {
+      response = await complete(
+        model,
+        request,
+        buildDirectReviewCompletionOptions(model, requestAuth, thinking, controller.signal),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (controller.signal.aborted || !isAuthRejection(message)) throw error;
+      const rotated = await resolveFreshRequestAuth(ctx.modelRegistry, model);
+      if (!rotated.ok || !rotated.apiKey || rotated.apiKey === requestAuth.apiKey) throw error;
+      requestAuth = { apiKey: rotated.apiKey, headers: rotated.headers, env: rotated.env };
+      response = await complete(
+        model,
+        request,
+        buildDirectReviewCompletionOptions(model, requestAuth, thinking, controller.signal),
+      );
+    }
+
+    if (response.stopReason === "aborted") {
+      return { ok: false, text: "", fallbackReason: "aborted" };
+    }
+    const text = responseText(response.content).trim();
+    return text
+      ? { ok: true, text }
+      : { ok: true, text: "", fallbackReason: "empty" };
+  } catch (error) {
+    if (controller.signal.aborted) {
+      return { ok: false, text: "", fallbackReason: "aborted" };
+    }
+    return {
+      ok: false,
+      text: "",
+      fallbackReason: "provider_error",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function runDirectMemoryCompletion(

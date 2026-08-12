@@ -50,7 +50,14 @@ import { migrateThenSyncMarkdownMemories, registerSyncMarkdownMemoriesCommand } 
 import { registerPreviewContextCommand } from "./handlers/preview-context.js";
 import { registerStandingPinCommand } from "./handlers/standing-pin.js";
 import { StandingInstructions } from "./store/standing-instructions.js";
-import { STANDING_FILE } from "./constants.js";
+import { STANDING_FILE, PRINCIPLES_FILE } from "./constants.js";
+import { registerMemoryConflictsCommand } from "./handlers/memory-conflicts.js";
+import { registerConcretionCommand } from "./handlers/concretion.js";
+import {
+  importLegacyMemoriesAsEvents,
+  renderAdaptivePrinciples,
+  writePrinciplesSnapshot,
+} from "./store/event-memory-store.js";
 import { loadConfig } from "./config.js";
 import { detectProject, detectProjectSkills } from "./project.js";
 import { buildPromptContext } from "./prompt-context.js";
@@ -179,6 +186,8 @@ export default function (pi: ExtensionAPI) {
             },
           },
         );
+        importLegacyMemoriesAsEvents(dbManager);
+        await writePrinciplesSnapshot(dbManager, path.join(globalDir, PRINCIPLES_FILE));
         persistenceInitialized = true;
       } catch {
         // Best-effort only: migration or SQLite backfill must not block startup.
@@ -220,7 +229,15 @@ export default function (pi: ExtensionAPI) {
 
   // ── 2. Inject memory policy by default; legacy mode keeps full frozen memory blocks ──
   pi.on("before_agent_start", async (event, _ctx) => {
-    const promptContext = await buildPromptContext(config, store, projectStoreRef(), projectNameRef(), standingStore);
+    const promptContext = await buildPromptContext(
+      config,
+      store,
+      projectStoreRef(),
+      projectNameRef(),
+      standingStore,
+      dbManager,
+      config.principleInjectionEnabled !== false,
+    );
 
     if (promptContext) {
       return {
@@ -239,6 +256,7 @@ export default function (pi: ExtensionAPI) {
   setupBackgroundReview(pi, store, projectStoreRef, config, {
     dbManager,
     projectName: projectNameRef,
+    globalDir,
   });
 
   // ── 6. Setup session-end flush ──
@@ -289,8 +307,18 @@ export default function (pi: ExtensionAPI) {
   registerInterviewCommand(pi, store);
   registerSwitchProjectCommand(pi, config);
   registerLearnMemoryCommand(pi);
+  registerConcretionCommand(pi, dbManager, globalDir, config);
+  registerMemoryConflictsCommand(pi, dbManager, globalDir, config.principleCharLimit ?? 5000);
   registerSyncMarkdownMemoriesCommand(pi, dbManager, globalDir, config.projectsMemoryDir, agentRoot);
-  registerPreviewContextCommand(pi, store, projectStoreRef, projectNameRef, config, standingStore);
+  registerPreviewContextCommand(
+    pi,
+    store,
+    projectStoreRef,
+    projectNameRef,
+    config,
+    standingStore,
+    dbManager,
+  );
   if (standingStore) registerStandingPinCommand(pi, standingStore);
 
   // ── 10. Live session indexing ──

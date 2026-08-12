@@ -18,6 +18,7 @@ describe("session project memory rebinding", () => {
     const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-project-rebind-target-"));
     const previousAgentRoot = process.env.PI_CODING_AGENT_DIR;
     const previousCwd = process.cwd();
+    let mockPi: MockPi | null = null;
     try {
       await fs.writeFile(
         path.join(agentRoot, "hermes-memory-config.json"),
@@ -46,7 +47,7 @@ describe("session project memory rebinding", () => {
       process.chdir(launchDir);
       // Import after setting PI_CODING_AGENT_DIR so AGENT_ROOT is test-local.
       const { default: registerExtension } = await import("../src/index.js");
-      const mockPi: MockPi = {
+      mockPi = {
         handlers: {},
         on(event, handler) {
           (this.handlers[event] ??= []).push(handler);
@@ -73,6 +74,13 @@ describe("session project memory rebinding", () => {
       assert.match(result.systemPrompt, /active-session memory/);
       assert.doesNotMatch(result.systemPrompt, /launch-directory memory/);
     } finally {
+      // The extension owns a persistent SQLite connection until Pi emits its
+      // shutdown event. Emit that lifecycle event before removing the fixture;
+      // Windows otherwise rejects deletion of the open WAL generation.
+      const shutdownHandlers = mockPi?.handlers.session_shutdown ?? [];
+      for (const shutdown of shutdownHandlers) {
+        await shutdown({}, { sessionManager: { getSessionFile: () => null } });
+      }
       process.chdir(previousCwd);
       if (previousAgentRoot === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousAgentRoot;

@@ -39,6 +39,12 @@ describe("loadConfig", () => {
     assert.strictEqual(config.llmModelOverride, undefined);
     assert.strictEqual(config.llmThinkingOverride, undefined);
     assert.strictEqual(config.standingInstructionsEnabled, true);
+    assert.strictEqual(config.eventMemoryEnabled, true);
+    assert.strictEqual(config.concretionEnabled, true);
+    assert.strictEqual(config.concretionReviewThreshold, 10);
+    assert.strictEqual(config.concretionEventBatchSize, 100);
+    assert.strictEqual(config.principleCharLimit, 5000);
+    assert.strictEqual(config.principleInjectionEnabled, true);
   });
 
   it("honors a configured consolidationTimeoutMs, warning only when it is below the default", () => {
@@ -82,6 +88,12 @@ describe("loadConfig", () => {
       projectsMemoryDir: "my-memory",
       llmModelOverride: " openrouter/deepseek/deepseek-v4-flash ",
       llmThinkingOverride: "minimal",
+      eventMemoryEnabled: false,
+      concretionEnabled: false,
+      concretionReviewThreshold: 20,
+      concretionEventBatchSize: 75,
+      principleCharLimit: 4200,
+      principleInjectionEnabled: false,
     }));
     const config = loadConfig(TEST_CONFIG_PATH);
     assert.strictEqual(config.memoryMode, "legacy-inject");
@@ -97,6 +109,12 @@ describe("loadConfig", () => {
     assert.strictEqual(config.projectsMemoryDir, "my-memory");
     assert.strictEqual(config.llmModelOverride, "openrouter/deepseek/deepseek-v4-flash");
     assert.strictEqual(config.llmThinkingOverride, "minimal");
+    assert.strictEqual(config.eventMemoryEnabled, false);
+    assert.strictEqual(config.concretionEnabled, false);
+    assert.strictEqual(config.concretionReviewThreshold, 20);
+    assert.strictEqual(config.concretionEventBatchSize, 75);
+    assert.strictEqual(config.principleCharLimit, 4200);
+    assert.strictEqual(config.principleInjectionEnabled, false);
     // Unset values use defaults
     assert.strictEqual(config.userCharLimit, 5000);
     assert.strictEqual(config.reviewEnabled, true);
@@ -175,6 +193,18 @@ describe("loadConfig", () => {
     }));
     config = loadConfig(TEST_CONFIG_PATH);
     assert.strictEqual(config.projectsMemoryDir, "projects-memory");
+  });
+
+  it("ignores invalid concretion numeric bounds", () => {
+    fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify({
+      concretionReviewThreshold: 0,
+      concretionEventBatchSize: 1.5,
+      principleCharLimit: -1,
+    }));
+    const config = loadConfig(TEST_CONFIG_PATH);
+    assert.strictEqual(config.concretionReviewThreshold, 10);
+    assert.strictEqual(config.concretionEventBatchSize, 100);
+    assert.strictEqual(config.principleCharLimit, 5000);
   });
 
   it("handles partial config with all boolean overrides", () => {

@@ -11,6 +11,9 @@ import {
   DEFAULT_NUDGE_TOOL_CALLS,
   DEFAULT_REVIEW_RECENT_MESSAGES,
   DEFAULT_FLUSH_RECENT_MESSAGES,
+  DEFAULT_CONCRETION_REVIEW_THRESHOLD,
+  DEFAULT_CONCRETION_EVENT_BATCH_SIZE,
+  DEFAULT_PRINCIPLE_CHAR_LIMIT,
   DEFAULT_CONSOLIDATION_TIMEOUT_MS,
   DEFAULT_FAILURE_INJECTION_MAX_AGE_DAYS,
   DEFAULT_FAILURE_INJECTION_MAX_ENTRIES,
@@ -61,6 +64,12 @@ const DEFAULT_CONFIG: MemoryConfig = {
   consolidationTimeoutMs: DEFAULT_CONSOLIDATION_TIMEOUT_MS,
   nudgeToolCalls: DEFAULT_NUDGE_TOOL_CALLS,
   standingInstructionsEnabled: true,
+  eventMemoryEnabled: true,
+  concretionEnabled: true,
+  concretionReviewThreshold: DEFAULT_CONCRETION_REVIEW_THRESHOLD,
+  concretionEventBatchSize: DEFAULT_CONCRETION_EVENT_BATCH_SIZE,
+  principleCharLimit: DEFAULT_PRINCIPLE_CHAR_LIMIT,
+  principleInjectionEnabled: true,
   projectsMemoryDir: DEFAULT_PROJECTS_MEMORY_DIR,
   sessionSearch: { variant: "legacy" },
 };
@@ -79,6 +88,9 @@ export function loadConfig(configPath = DEFAULT_CONFIG_PATH): MemoryConfig {
       const config: MemoryConfig = { ...DEFAULT_CONFIG };
       const isNonNegativeNumber = (value: unknown): value is number => (
         typeof value === "number" && Number.isFinite(value) && value >= 0
+      );
+      const isPositiveInteger = (value: unknown): value is number => (
+        typeof value === "number" && Number.isInteger(value) && value > 0
       );
       const isStringArray = (value: unknown): value is string[] => (
         Array.isArray(value) && value.every((item) => typeof item === "string")
@@ -130,6 +142,12 @@ export function loadConfig(configPath = DEFAULT_CONFIG_PATH): MemoryConfig {
       if (typeof parsed.failureInjectionMaxEntries === "number") config.failureInjectionMaxEntries = parsed.failureInjectionMaxEntries;
       if (typeof parsed.nudgeToolCalls === "number") config.nudgeToolCalls = parsed.nudgeToolCalls;
       if (typeof parsed.standingInstructionsEnabled === "boolean") config.standingInstructionsEnabled = parsed.standingInstructionsEnabled;
+      if (typeof parsed.eventMemoryEnabled === "boolean") config.eventMemoryEnabled = parsed.eventMemoryEnabled;
+      if (typeof parsed.concretionEnabled === "boolean") config.concretionEnabled = parsed.concretionEnabled;
+      if (isPositiveInteger(parsed.concretionReviewThreshold)) config.concretionReviewThreshold = parsed.concretionReviewThreshold;
+      if (isPositiveInteger(parsed.concretionEventBatchSize)) config.concretionEventBatchSize = parsed.concretionEventBatchSize;
+      if (isPositiveInteger(parsed.principleCharLimit)) config.principleCharLimit = parsed.principleCharLimit;
+      if (typeof parsed.principleInjectionEnabled === "boolean") config.principleInjectionEnabled = parsed.principleInjectionEnabled;
       if (typeof parsed.projectCharLimit === "number") config.projectCharLimit = parsed.projectCharLimit;
       if (typeof parsed.memoryDir === "string") {
         const normalizedMemoryDir = normalizeConfiguredMemoryDir(parsed.memoryDir);

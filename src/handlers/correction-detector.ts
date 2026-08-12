@@ -25,6 +25,7 @@ import { getMessageText } from "../types.js";
 import { execChildPrompt } from "./pi-child-process.js";
 import { resolveProjectName, resolveProjectStore, type ProjectNameRef, type ProjectStoreRef } from "../project-context.js";
 import { runDirectMemoryCompletion, usesDirectTransport } from "./review-memory-ops.js";
+import { captureMemoryEvents } from "../store/event-memory-store.js";
 
 /**
  * Extract the directive part from a correction message.
@@ -133,6 +134,7 @@ export function setupCorrectionDetector(
   if (!config.correctionDetection) return;
 
   let pendingCorrection = false;
+  let pendingCorrectionText = "";
   let turnsSinceLastCorrection = 3; // Start at threshold so first correction can fire immediately
   let correctionInProgress = false;
   const runDirect = deps.runDirectMemoryCompletion ?? runDirectMemoryCompletion;
@@ -144,6 +146,7 @@ export function setupCorrectionDetector(
     if (!text) return;
     if (isCorrection(text, config)) {
       pendingCorrection = true;
+      pendingCorrectionText = text;
     }
   });
 
@@ -154,6 +157,8 @@ export function setupCorrectionDetector(
       return;
     }
     pendingCorrection = false;
+    const detectedCorrectionText = pendingCorrectionText;
+    pendingCorrectionText = "";
 
     // Rate limit: max 1 correction save per 3 turns
     if (turnsSinceLastCorrection < 3) return;
@@ -181,6 +186,47 @@ export function setupCorrectionDetector(
 
       const activeProjectStore = resolveProjectStore(projectStore);
       const activeProjectName = resolveProjectName(projectName);
+
+      let lastUserMsg: string | undefined;
+      for (let i = recentParts.length - 1; i >= 0; i--) {
+        if (recentParts[i].startsWith("[USER]")) {
+          lastUserMsg = recentParts[i];
+          break;
+        }
+      }
+      const correctionText = lastUserMsg
+        ? lastUserMsg.replace(/^\[USER\]:\s*/, "")
+        : detectedCorrectionText;
+      const directive = correctionText ? extractCorrectionDirective(correctionText) : "";
+
+      if (config.eventMemoryEnabled !== false && dbManager && correctionText) {
+        try {
+          const sessionManager = ctx.sessionManager as typeof ctx.sessionManager & {
+            getHeader?: () => { id?: string } | null;
+          };
+          const captured = captureMemoryEvents(
+            dbManager,
+            [{
+              scope: activeProjectStore ? "project" : "user",
+              kind: "correction",
+              content: `User corrected the agent: ${directive || correctionText}`,
+              evidenceQuote: correctionText,
+            }],
+            {
+              project: activeProjectStore ? activeProjectName : null,
+              source: "correction",
+              sourceSessionId: sessionManager.getHeader?.()?.id ?? null,
+            },
+          );
+          if (captured.inserted > 0) {
+            ctx.ui.notify("🔧 Correction detected — episodic memory recorded", "info");
+          }
+        } catch {
+          ctx.ui.notify("Correction detected, but episodic memory could not be recorded.", "warning");
+        }
+        return;
+      }
+
       const currentMemory = store.getMemoryEntries().join(ENTRY_DELIMITER);
       const currentUser = store.getUserEntries().join(ENTRY_DELIMITER);
       const currentProject = activeProjectStore ? activeProjectStore.getMemoryEntries().join(ENTRY_DELIMITER) : null;
@@ -255,18 +301,9 @@ export function setupCorrectionDetector(
         ctx.ui.notify("🔧 Correction detected — memory updated", "info");
       }
 
-      // Also save as a failure memory for learning
+      // Also save as a failure memory for the legacy memory mode.
       try {
-        let lastUserMsg: string | undefined;
-        for (let i = recentParts.length - 1; i >= 0; i--) {
-          if (recentParts[i].startsWith("[USER]")) {
-            lastUserMsg = recentParts[i];
-            break;
-          }
-        }
-        const correctionText = lastUserMsg ? lastUserMsg.replace(/^\[USER\]:\s*/, "") : "";
         if (correctionText) {
-          const directive = extractCorrectionDirective(correctionText);
           const failureReason = "User corrected the agent";
           const scopedProjectName = activeProjectStore ? activeProjectName : null;
           await store.addFailure(directive, {
