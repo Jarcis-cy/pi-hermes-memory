@@ -233,7 +233,7 @@ describe('memory sqlite sync + markdown backfill', () => {
     fs.writeFileSync(memoryFile, 'stale memory', 'utf-8');
     addMemory(dbManager, 'stale memory');
 
-    const identity = fs.realpathSync(memoryFile);
+    const identity = fs.realpathSync.native(memoryFile);
     const coordinator = new AtomicLockCoordinator(path.join(path.dirname(path.dirname(identity)), '.pi-hermes-locks.sqlite'));
     const lease = coordinator.tryAcquire(`mutation:${identity}`, { staleMs: 300_000 });
     assert.ok(lease);
@@ -251,6 +251,7 @@ describe('memory sqlite sync + markdown backfill', () => {
     fs.writeFileSync(memoryFile, ['stale memory', 'newer writer memory'].join(ENTRY_DELIMITER), 'utf-8');
     addMemory(dbManager, 'newer writer memory');
     lease.release();
+    coordinator.close();
     await syncing;
 
     assert.ok(waitedForMutation, 'reconciliation must wait for the active Markdown mutation');

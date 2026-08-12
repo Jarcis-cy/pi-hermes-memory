@@ -47,6 +47,8 @@ interface ExecChildPromptOptions {
   model?: ChildPiModel;
   timeoutMs: number;
   retryWithoutOverrides?: boolean;
+  /** Run the child as a JSON-only reasoning call with no tools or ambient skills/context. */
+  jsonOnly?: boolean;
 }
 
 interface ExecChildPromptDependencies {
@@ -458,6 +460,12 @@ async function writePromptToTemporaryFile(prompt: string): Promise<{ dir: string
   }
 }
 
+function isolateJsonOnlyArgs(args: string[], enabled: boolean | undefined): string[] {
+  if (!enabled || args.length === 0) return args;
+  const prompt = args[args.length - 1];
+  return [...args.slice(0, -1), "--no-tools", "--no-skills", "--no-context-files", prompt];
+}
+
 export async function execChildPrompt(
   pi: Pick<ExtensionAPI, "exec">,
   prompt: string,
@@ -485,8 +493,10 @@ export async function execChildPrompt(
   try {
     try {
       const invocation = resolveWatchedChildPiInvocation(
-        resolveChildPiInvocation(buildChildPiPromptArgs(promptReference, config, process.argv.slice(2), options.model)),
-        options.timeoutMs,
+        resolveChildPiInvocation(isolateJsonOnlyArgs(
+          buildChildPiPromptArgs(promptReference, config, process.argv.slice(2), options.model),
+          options.jsonOnly,
+        )),        options.timeoutMs,
         cancellationPath,
       );
       const result = await pi.exec(invocation.command, invocation.args, execOptions) as PiExecResult;
@@ -509,8 +519,10 @@ export async function execChildPrompt(
     }
 
     const retryInvocation = resolveWatchedChildPiInvocation(
-      resolveChildPiInvocation(basePromptArgs(promptReference, config, options.model)),
-      options.timeoutMs,
+      resolveChildPiInvocation(isolateJsonOnlyArgs(
+        basePromptArgs(promptReference, config, options.model),
+        options.jsonOnly,
+      )),      options.timeoutMs,
       cancellationPath,
     );
     return await pi.exec(retryInvocation.command, retryInvocation.args, execOptions) as PiExecResult;

@@ -387,6 +387,7 @@ async function migrateDatabaseGeneration(
   backup: (source: string, staged: string, onProgress?: () => void) => Promise<void>,
   onBackupProgress?: () => void,
 ): Promise<void> {
+  const migrationLockPath = path.join(targetRoot, ".pi-hermes-locks.sqlite");
   let lease: AtomicLockLease | null = null;
   try {
     lease = await acquireMigrationLease(legacyRoot, targetRoot);
@@ -399,6 +400,7 @@ async function migrateDatabaseGeneration(
       target: path.join(targetRoot, "sessions.db"),
       message,
     });
+    AtomicLockCoordinator.closeShared(migrationLockPath);
     return;
   }
 
@@ -508,24 +510,34 @@ async function migrateDatabaseGeneration(
           try { await fs.unlink(staged); } catch {}
         }
       }
-      if (corruptGeneration) {
-        try {
-          retired = await moveDatabaseGeneration(generationNames, legacyRoot, retirementDir, retire);
-        } catch (error) {
-          if (error instanceof DatabaseGenerationMoveError) retired = error.moved;
-          throw error;
-        }
-        for (const name of retired) {
-          const target = path.join(targetRoot, name);
-          await publish(path.join(retirementDir, name), target);
-          published.set(target, await fileIdentity(target));
-        }
-      }
     } else {
       throw new Error("sessions.db is not a regular file or symlink");
     }
 
-    if (!corruptGeneration) {
+    // Windows does not permit retiring SQLite files while this process still
+    // holds them open. The process-wide migration lease still excludes another
+    // extension migration; an unrelated live SQLite handle makes rename fail
+    // safely and leaves the source generation retryable.
+    if (process.platform === "win32" && writeLock) {
+      writeLock.exec("COMMIT");
+      writeLock.close();
+      writeLock = null;
+      generationNames = await databaseFilesAt(legacyRoot);
+    }
+
+    if (corruptGeneration) {
+      try {
+        retired = await moveDatabaseGeneration(generationNames, legacyRoot, retirementDir, retire);
+      } catch (error) {
+        if (error instanceof DatabaseGenerationMoveError) retired = error.moved;
+        throw error;
+      }
+      for (const name of retired) {
+        const target = path.join(targetRoot, name);
+        await publish(path.join(retirementDir, name), target);
+        published.set(target, await fileIdentity(target));
+      }
+    } else {
       try {
         retired = await moveDatabaseGeneration(generationNames, legacyRoot, retirementDir, retire);
       } catch (error) {
@@ -589,7 +601,11 @@ async function migrateDatabaseGeneration(
     }
   }
   } finally {
-    lease.release();
+    try {
+      lease.release();
+    } finally {
+      AtomicLockCoordinator.closeShared(migrationLockPath);
+    }
   }
 }
 

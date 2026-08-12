@@ -135,6 +135,18 @@ export interface MemoryConfig {
    * Default: 0 (disabled).
    */
   sessionRetentionDays?: number;
+  /** Capture automatic learning as append-only SQLite events. Default: true */
+  eventMemoryEnabled?: boolean;
+  /** Periodically distill pending events into adaptive principles. Default: true */
+  concretionEnabled?: boolean;
+  /** Successful background-review captures required before automatic concretion. Default: 10 */
+  concretionReviewThreshold?: number;
+  /** Maximum pending events considered in one concretion run. Default: 100 */
+  concretionEventBatchSize?: number;
+  /** Maximum characters across active adaptive principles. Default: 5000 */
+  principleCharLimit?: number;
+  /** Inject accepted adaptive principles into every agent run. Default: true */
+  principleInjectionEnabled?: boolean;
 }
 
 export type MemoryCategory =

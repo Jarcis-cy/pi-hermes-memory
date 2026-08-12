@@ -29,10 +29,13 @@ export async function acquireMarkdownMutationLock(filePath: string): Promise<Ato
 }
 
 export async function withMarkdownMutationLock<T>(filePath: string, operation: () => Promise<T> | T): Promise<T> {
-  const lease = await acquireMarkdownMutationLock(filePath);
+  const identity = await canonicalMarkdownIdentity(filePath);
+  const coordinatorPath = path.join(path.dirname(path.dirname(identity)), ".pi-hermes-locks.sqlite");
+  const lease = await acquireMarkdownMutationLock(identity);
   try {
     return await operation();
   } finally {
     lease.release();
+    AtomicLockCoordinator.closeShared(coordinatorPath);
   }
 }

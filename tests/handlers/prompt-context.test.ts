@@ -116,6 +116,26 @@ describe("buildPromptContext", () => {
     formatForSystemPrompt: () => "<standing-instructions>\n1. never run find /\n</standing-instructions>",
   } as any;
 
+  it("keeps policy and standing instructions when adaptive principle lookup fails", async () => {
+    const failingDbManager = {
+      getDb: () => {
+        throw new Error("sqlite unavailable");
+      },
+    } as any;
+    const result = await buildPromptContext(
+      { memoryMode: "policy-only" },
+      store,
+      projectStore,
+      "demo",
+      standing,
+      failingDbManager,
+    );
+
+    assert.ok(result.startsWith(MEMORY_POLICY_PROMPT));
+    assert.match(result, /<standing-instructions>/);
+    assert.doesNotMatch(result, /<adaptive-principles>/);
+  });
+
   it("appends standing instructions after the policy in policy-only mode", async () => {
     const result = await buildPromptContext(
       { memoryMode: "policy-only" },

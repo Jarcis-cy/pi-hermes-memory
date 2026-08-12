@@ -32,6 +32,21 @@ export interface DirectReviewResult {
   error?: string;
 }
 
+export interface DirectJsonResult {
+  ok: boolean;
+  text: string;
+  fallbackReason?: "no_model" | "no_auth" | "aborted" | "provider_error" | "empty";
+  error?: string;
+}
+
+export interface RunDirectJsonCompletionOptions {
+  userPrompt: string;
+  systemPrompt: string;
+  config: Pick<MemoryConfig, "llmModelOverride" | "llmThinkingOverride">;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 export interface RunDirectMemoryCompletionOptions {
   userPrompt: string;
   systemPrompt: string;
@@ -433,6 +448,68 @@ function extractJsonPayload(text: string): JsonObjectPayload | null {
   return lastParseableOperationsObject(trimmed);
 }
 
+/** Generic payload extraction for callers whose schema uses a different
+ * top-level array key than `operations` (episodic `events`, concretion
+ * `candidates`). Same cascade and #235/#197 hardening as the operations
+ * path: direct parse, fenced block, substring, then last balanced span
+ * carrying any of the requested keys. */
+export function extractPayloadWithArrayKeys(
+  text: string,
+  keys: readonly string[],
+): Record<string, unknown> | null {
+  const carriesKey = (value: unknown): Record<string, unknown> | null => {
+    if (!isJsonObjectPayload(value)) return null;
+    for (const key of keys) {
+      if (Array.isArray(value[key])) return value as Record<string, unknown>;
+    }
+    return null;
+  };
+
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = carriesKey(JSON.parse(trimmed));
+    if (parsed) return parsed;
+  } catch {
+    // continue
+  }
+
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) {
+    try {
+      const parsed = carriesKey(JSON.parse(fenced[1].trim()));
+      if (parsed) return parsed;
+    } catch {
+      // continue
+    }
+  }
+
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    try {
+      const parsed = carriesKey(JSON.parse(trimmed.slice(start, end + 1)));
+      if (parsed) return parsed;
+    } catch {
+      // fall through to span scan
+    }
+  }
+
+  const spans = balancedObjectSpans(trimmed);
+  for (let s = spans.length - 1; s >= 0; s--) {
+    const span = spans[s];
+    if (!span) continue;
+    try {
+      const parsed = carriesKey(JSON.parse(trimmed.slice(span[0], span[1] + 1)));
+      if (parsed) return parsed;
+    } catch {
+      // keep scanning
+    }
+  }
+  return null;
+}
+
 /** A winning thinking-channel candidate plus whether it sits at the tail of
  * the channel — the trust boundary for thinking-sourced operations. */
 interface ThinkingOperationsCandidate {
@@ -751,6 +828,85 @@ type RegistryStreamSimple = (
 function withHostUpgradeHint(message: string, hostCanStream: boolean): string {
   if (hostCanStream || !/No API provider registered for api/i.test(message)) return message;
   return `${message} (this provider is registered by an extension; upgrade Pi to 0.86.0 or later so direct memory completions can use it)`;
+}
+
+export async function runDirectJsonCompletion(
+  ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
+  options: RunDirectJsonCompletionOptions,
+  deps: { completeSimple?: typeof completeSimple } = {},
+): Promise<DirectJsonResult> {
+  const complete = deps.completeSimple ?? completeSimple;
+  const model = resolveReviewModel(ctx.model, ctx.modelRegistry, options.config);
+  if (!model) return { ok: false, text: "", fallbackReason: "no_model" };
+
+  const auth = await resolveFreshRequestAuth(ctx.modelRegistry, model);
+  if (!auth.ok || !auth.apiKey) {
+    return {
+      ok: false,
+      text: "",
+      fallbackReason: "no_auth",
+      error: auth.ok ? `No API key for ${model.provider}` : auth.error,
+    };
+  }
+
+  let requestAuth = { apiKey: auth.apiKey, headers: auth.headers, env: auth.env };
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? 120000;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  options.signal?.addEventListener("abort", () => controller.abort(), { once: true });
+  const thinking = effectiveThinkingOverride(options.config);
+  const request = {
+    systemPrompt: options.systemPrompt,
+    messages: [{
+      role: "user" as const,
+      content: [{ type: "text" as const, text: options.userPrompt }],
+      timestamp: Date.now(),
+    }],
+  };
+
+  try {
+    let response;
+    try {
+      response = await complete(
+        model,
+        request,
+        buildDirectReviewCompletionOptions(model, requestAuth, thinking, controller.signal),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (controller.signal.aborted || !isAuthRejection(message)) throw error;
+      const rotated = await resolveFreshRequestAuth(ctx.modelRegistry, model);
+      if (!rotated.ok || !rotated.apiKey || rotated.apiKey === requestAuth.apiKey) throw error;
+      requestAuth = { apiKey: rotated.apiKey, headers: rotated.headers, env: rotated.env };
+      response = await complete(
+        model,
+        request,
+        buildDirectReviewCompletionOptions(model, requestAuth, thinking, controller.signal),
+      );
+    }
+
+    if (response.stopReason === "aborted") {
+      return { ok: false, text: "", fallbackReason: "aborted" };
+    }
+    // Channel-aware: thinking-default servers park the whole answer in the
+    // reasoning channel; recover it instead of returning empty (#197).
+    const text = responseChannelText(response.content).text.trim();
+    return text
+      ? { ok: true, text }
+      : { ok: true, text: "", fallbackReason: "empty" };
+  } catch (error) {
+    if (controller.signal.aborted) {
+      return { ok: false, text: "", fallbackReason: "aborted" };
+    }
+    return {
+      ok: false,
+      text: "",
+      fallbackReason: "provider_error",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function runDirectMemoryCompletion(

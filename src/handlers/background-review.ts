@@ -19,6 +19,8 @@ import type { MemoryConfig } from "../types.js";
 import type { EnsureMemoryReady } from "../memory-initialization.js";
 import { applyRecentMessageLimit, collectMessageParts } from "./message-parts.js";
 import { cleanChildStderr, execChildPrompt, resolveChildPiModel } from "./pi-child-process.js";
+import { extractAndCaptureEvents } from "./event-extraction.js";
+import { runConcretion, shouldRunAutomaticConcretion } from "./concretion.js";
 import { REVIEW_COMPLETION_TIMEOUT_MS, runDirectMemoryCompletion, usesDirectTransport, type DirectReviewResult } from "./review-memory-ops.js";
 
 import { resolveProjectName, resolveProjectStore, type ProjectNameRef, type ProjectStoreRef } from "../project-context.js";
@@ -32,6 +34,8 @@ export interface BackgroundReviewOptions {
 export interface BackgroundReviewDeps {
   runDirectReview?: typeof runDirectMemoryCompletion;
   execChildPrompt?: typeof execChildPrompt;
+  extractAndCaptureEvents?: typeof extractAndCaptureEvents;
+  runConcretion?: typeof runConcretion;
   /** Test-only hook: called once runReview() has fully settled (after the
    * fire-and-forget review work completes and activeReview clears),
    * since production callers never await runReview() directly. */
@@ -166,6 +170,8 @@ export function setupBackgroundReview(
   const projectName = options.projectName ?? null;
   const runDirectReview = options.deps?.runDirectReview ?? runDirectMemoryCompletion;
   const execChild = options.deps?.execChildPrompt ?? execChildPrompt;
+  const captureEvents = options.deps?.extractAndCaptureEvents ?? extractAndCaptureEvents;
+  const concretize = options.deps?.runConcretion ?? runConcretion;
   const onReviewSettled = options.deps?.onReviewSettled;
   const shutdownGraceMs = options.deps?.shutdownGraceMs ?? SESSION_REVIEW_SHUTDOWN_GRACE_MS;
 
@@ -271,6 +277,56 @@ export function setupBackgroundReview(
       const directPrompt = buildDirectReviewUserPrompt(promptInput);
 
       let directFailure: string | undefined;
+
+      // Fork layer: append-only episodic capture replaces the markdown review
+      // write path; events later distill into principles via concretion.
+      if (config.eventMemoryEnabled !== false && dbManager) {
+        const sessionManager = ctx.sessionManager as typeof ctx.sessionManager & {
+          getHeader?: () => { id?: string } | null;
+        };
+        const sourceSessionId = sessionManager.getHeader?.()?.id ?? null;
+        const captured = await captureEvents(
+          pi,
+          ctx,
+          dbManager,
+          config,
+          {
+            parts,
+            projectName: activeProjectName,
+            source: "background-review",
+            sourceSessionId,
+          },
+          { timeoutMs: REVIEW_COMPLETION_TIMEOUT_MS, signal: sessionAbort.signal },
+        );
+        if (!captured.ok) return;
+        if (captured.inserted > 0) {
+          ctx.ui.notify(
+            `💾 Memory auto-review recorded ${captured.inserted} event${captured.inserted === 1 ? "" : "s"}`,
+            "info",
+          );
+        }
+        if (
+          captured.inserted > 0
+          && options.globalDir
+          && shouldRunAutomaticConcretion(dbManager, config)
+        ) {
+          const result = await concretize(
+            pi,
+            ctx,
+            dbManager,
+            options.globalDir,
+            config,
+            "automatic",
+          );
+          if (result.ok && (result.added > 0 || result.refined > 0 || result.reinforced > 0 || result.conflicts > 0)) {
+            ctx.ui.notify(
+              `🧠 Memory concretion: ${result.added} added, ${result.refined} refined, ${result.reinforced} reinforced, ${result.conflicts} conflict${result.conflicts === 1 ? "" : "s"}`,
+              result.conflicts > 0 ? "warning" : "info",
+            );
+          }
+        }
+        return;
+      }
 
       if (usesDirectTransport(config)) {
         try {

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { isBunRuntime, loadBetterSqlite3 } from './sqlite-native.js';
+import { canonicalStoragePathSync } from './canonical-storage-path.js';
 
 type StatementLike = {
   run: (...args: unknown[]) => unknown;
@@ -124,6 +125,7 @@ export class AtomicLockCoordinator {
   private readonly probeIncarnation: (pid: number) => string | null;
   private cachedDb: DatabaseLike | null = null;
   private lastSweepMs = 0;
+  private readonly activeTokens = new Set<string>();
 
   constructor(private readonly dbPath: string, options: AtomicLockCoordinatorOptions = {}) {
     this.pid = options.pid ?? process.pid;
@@ -195,6 +197,7 @@ export class AtomicLockCoordinator {
     }
 
     if (!acquired) return null;
+    this.activeTokens.add(token);
     return {
       token,
       release: () => this.release(key, token),
@@ -255,6 +258,7 @@ export class AtomicLockCoordinator {
       try {
         this.deleteOwnedLock(key, token);
         pendingReleases.delete(pendingKey);
+        this.activeTokens.delete(token);
         return;
       } catch {
       }
@@ -321,6 +325,15 @@ export class AtomicLockCoordinator {
     return `${path.resolve(this.dbPath)}\0${key}\0${token}`;
   }
 
+  private hasPendingReleases(): boolean {
+    const prefix = `${path.resolve(this.dbPath)}\0`;
+    return [...pendingReleases.keys()].some((key) => key.startsWith(prefix));
+  }
+
+  private canCloseShared(): boolean {
+    return this.activeTokens.size === 0 && !this.hasPendingReleases();
+  }
+
   private discardCachedDb(): void {
     const db = this.cachedDb;
     this.cachedDb = null;
@@ -375,11 +388,24 @@ export class AtomicLockCoordinator {
    * The option-carrying constructor stays public for tests, which pass a
    * synthetic pid/incarnation that a dbPath-keyed cache would silently ignore.
    */
+  close(): void {
+    this.discardCachedDb();
+  }
+
+  /** Release a process-wide shared coordinator when its storage lifetime ends. */
+  static closeShared(dbPath: string): void {
+    const key = canonicalStoragePathSync(dbPath);
+    const coordinator = sharedCoordinators.get(key);
+    if (!coordinator || !coordinator.canCloseShared()) return;
+    coordinator.close();
+    sharedCoordinators.delete(key);
+  }
+
   static shared(dbPath: string): AtomicLockCoordinator {
-    const key = path.resolve(dbPath);
+    const key = canonicalStoragePathSync(dbPath);
     let coordinator = sharedCoordinators.get(key);
     if (!coordinator) {
-      coordinator = new AtomicLockCoordinator(dbPath);
+      coordinator = new AtomicLockCoordinator(key);
       sharedCoordinators.set(key, coordinator);
     }
     return coordinator;

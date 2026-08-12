@@ -38,6 +38,8 @@ import { registerSkillTool } from "./tools/skill-tool.js";
 import { registerSessionSearchTool } from "./tools/session-search-tool.js";
 import { registerMemorySearchTool } from "./tools/memory-search-tool.js";
 import { setupBackgroundReview } from "./handlers/background-review.js";
+import { registerMemoryConflictsCommand } from "./handlers/memory-conflicts.js";
+import { registerConcretionCommand } from "./handlers/concretion.js";
 import { setupSessionFlush } from "./handlers/session-flush.js";
 import { registerInsightsCommand } from "./handlers/insights.js";
 import { triggerConsolidation, registerConsolidateCommand } from "./handlers/auto-consolidate.js";
@@ -48,11 +50,12 @@ import { registerSwitchProjectCommand } from "./handlers/switch-project.js";
 import { registerIndexSessionsCommand } from "./handlers/index-sessions.js";
 import { registerLearnMemoryCommand } from "./handlers/learn-memory.js";
 import { migrateThenSyncMarkdownMemories, registerSyncMarkdownMemoriesCommand } from "./handlers/sync-markdown-memories.js";
+import { importLegacyMemoriesAsEvents, writePrinciplesSnapshot } from "./store/event-memory-store.js";
 import { registerPreviewContextCommand } from "./handlers/preview-context.js";
 import { registerStandingPinCommand } from "./handlers/standing-pin.js";
 import { isMemoryChildProcess } from "./handlers/pi-child-process.js";
 import { StandingInstructions } from "./store/standing-instructions.js";
-import { STANDING_FILE } from "./constants.js";
+import { PRINCIPLES_FILE, STANDING_FILE } from "./constants.js";
 import { loadConfig } from "./config.js";
 import { shouldWarnAutoConsolidationFailure } from "./auto-consolidation-warning.js";
 import { detectProject, detectProjectSkills } from "./project.js";
@@ -221,6 +224,10 @@ export default function (pi: ExtensionAPI) {
             },
           );
         });
+        // Fork layer: legacy markdown entries become append-only events, and
+        // the principles snapshot is refreshed so PRINCIPLES.md tracks the DB.
+        importLegacyMemoriesAsEvents(dbManager);
+        await writePrinciplesSnapshot(dbManager, path.join(globalDir, PRINCIPLES_FILE));
         persistenceInitialized = true;
       } catch (error) {
         if (lazy) throw error;
@@ -303,7 +310,16 @@ export default function (pi: ExtensionAPI) {
 
   // ── 2. Inject memory policy by default; legacy mode keeps full frozen memory blocks ──
   pi.on("before_agent_start", async (event, _ctx) => {
-    const promptContext = await buildPromptContext(config, store, projectStoreRef(), projectNameRef(), standingStore, isMemoryChildProcess());
+    const promptContext = await buildPromptContext(
+      config,
+      store,
+      projectStoreRef(),
+      projectNameRef(),
+      standingStore,
+      isMemoryChildProcess(),
+      dbManager,
+      config.principleInjectionEnabled !== false,
+    );
     if (!promptContext) return;
 
     // pi 0.86+ hands handlers a normalized clone of these options and re-renders
@@ -342,6 +358,7 @@ export default function (pi: ExtensionAPI) {
     dbManager,
     projectName: projectNameRef,
     ensureMemoryReady,
+    globalDir,
   });
 
   // ── 6. Setup session-end flush ──
@@ -391,6 +408,8 @@ export default function (pi: ExtensionAPI) {
 
   // ── 9. Register commands ──
   registerInsightsCommand(memoryPi, store, projectStoreRef, projectNameRef, dbManager);
+  registerConcretionCommand(memoryPi, dbManager, globalDir, config);
+  registerMemoryConflictsCommand(memoryPi, dbManager, globalDir, config.principleCharLimit ?? 5000);
   registerSkillsCommand(pi, skillStore);
   registerInterviewCommand(memoryPi, store);
   registerSwitchProjectCommand(pi, config);

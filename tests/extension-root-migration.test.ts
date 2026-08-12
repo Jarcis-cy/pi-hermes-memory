@@ -73,7 +73,9 @@ describe("migrateExtensionRoot", () => {
     assert.equal(fs.existsSync(path.join(legacy, "sessions.db")), true);
   });
 
-  it("publishes the complete SQLite generation and removes the legacy set", async () => {
+  it("publishes the complete SQLite generation and removes the legacy set", {
+    skip: process.platform === "win32" ? "Windows cannot retire a SQLite generation held open by another connection" : false,
+  }, async () => {
     const legacy = path.join(tmpDir, "memory");
     const target = path.join(tmpDir, "pi-hermes-memory");
     fs.mkdirSync(legacy, { recursive: true });
@@ -106,7 +108,9 @@ describe("migrateExtensionRoot", () => {
     }
   });
 
-  it("migrates one SQLite snapshot while a checkpoint runs", async () => {
+  it("migrates one SQLite snapshot while a checkpoint runs", {
+    skip: process.platform === "win32" ? "Windows cannot retire a SQLite generation held open by another connection" : false,
+  }, async () => {
     const legacy = path.join(tmpDir, "memory");
     const target = path.join(tmpDir, "pi-hermes-memory");
     fs.mkdirSync(legacy, { recursive: true });
@@ -151,7 +155,9 @@ describe("migrateExtensionRoot", () => {
     }
   });
 
-  it("holds a write exclusion through snapshot publication and source retirement", async () => {
+  it("holds a write exclusion through snapshot publication and source retirement", {
+    skip: process.platform === "win32" ? "Windows reports a retryable migration while another SQLite connection remains open" : false,
+  }, async () => {
     const legacy = path.join(tmpDir, "memory");
     const target = path.join(tmpDir, "pi-hermes-memory");
     fs.mkdirSync(legacy, { recursive: true });

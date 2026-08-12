@@ -468,7 +468,8 @@ describe("execChildPrompt", () => {
     assert.match(calls[0].args[0].replaceAll("\\", "/"), /child-process-watchdog\.mjs$/);
     assert.equal(calls[0].args[1], "30000");
     assert.match(calls[0].args[2], /cancel$/);
-    assert.equal(calls[0].args[3], "pi");
+    const logicalArgs = logicalChildArgs({ cmd: calls[0].cmd, args: calls[0].args });
+    assert.equal(logicalArgs[0], "-p");
     assert.equal(calls[0].timeout, 35000);
   });
 
@@ -673,7 +674,9 @@ describe("execChildPrompt", () => {
         assert.match(promptArg, /^@/);
         promptPath = promptArg.slice(1);
         assert.equal(await fs.readFile(promptPath, "utf-8"), secret);
-        assert.equal((await fs.stat(promptPath)).mode & 0o777, 0o600);
+        if (process.platform !== "win32") {
+          assert.equal((await fs.stat(promptPath)).mode & 0o777, 0o600);
+        }
         return { code: 0, stdout: "ok", stderr: "" };
       },
     };

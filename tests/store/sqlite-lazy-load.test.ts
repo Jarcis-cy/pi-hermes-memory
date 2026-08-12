@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const srcRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../src");
 
@@ -48,9 +48,9 @@ describe("SQLite native loading is deferred past extension load", () => {
     // poisoned require hook is installed before the graph is evaluated.
     const body = [
       `for (const specifier of ${JSON.stringify([
-        path.join(srcRoot, "extension-root-migration.ts"),
-        path.join(srcRoot, "store/db.ts"),
-        path.join(srcRoot, "store/atomic-lock-coordinator.ts"),
+        pathToFileURL(path.join(srcRoot, "extension-root-migration.ts")).href,
+        pathToFileURL(path.join(srcRoot, "store/db.ts")).href,
+        pathToFileURL(path.join(srcRoot, "store/atomic-lock-coordinator.ts")).href,
       ])}) {`,
       "  await import(specifier);",
       "}",
@@ -64,7 +64,7 @@ describe("SQLite native loading is deferred past extension load", () => {
 
   it("still fails loudly when SQLite is actually used", () => {
     const body = [
-      `const { AtomicLockCoordinator } = await import(${JSON.stringify(path.join(srcRoot, "store/atomic-lock-coordinator.ts"))});`,
+      `const { AtomicLockCoordinator } = await import(${JSON.stringify(pathToFileURL(path.join(srcRoot, "store/atomic-lock-coordinator.ts")).href)});`,
       'const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hermes-lazy-sqlite-use-"));',
       'new AtomicLockCoordinator(path.join(dir, "locks.sqlite")).tryAcquire("k", { staleMs: 1000 });',
     ].join("\n");

@@ -56,16 +56,18 @@ No manual action is needed. Launch Pi once after upgrade to let migration/normal
 |---|---|
 | 🔍 **Session Search** | Search across all past conversations via SQLite FTS5 |
 | 🧠 **Persistent Memory** | Facts, preferences, lessons saved to markdown files |
-| 🔄 **Memory Search Sync** | Successful Markdown memory writes are mirrored into SQLite for `memory_search` |
+| 🔄 **Episodic Memory** | Auto-review, session flush, and corrections append concrete events to an unlimited SQLite ledger |
+| 🧭 **Adaptive Principles** | Every 10 successful auto-review captures, cited events are distilled into a 5,000-character injected principle set |
+| ⚖️ **Conflict Queue** | Conflicting or over-budget principles stay inactive until the user resolves them |
 | ⚠️ **Failure Memory** | Learn from failures — stores what didn't work and why |
 | 📚 **Procedural Skills** | The agent saves *how* it solved problems as reusable docs |
-| ⚡ **Background Learning** | Every 10 turns (or 15 tool calls) the agent reviews and saves |
-| 🔧 **Correction Detection** | When you correct the agent, it saves immediately |
-| 🔄 **Auto-Consolidation** | When legacy-inject memory hits capacity, auto-merges instead of erroring |
+| ⚡ **Background Learning** | Every 10 turns (or 15 tool calls) the agent records concrete events; every 10 successful event reviews it attempts concretion |
+| 🔧 **Correction Detection** | When you correct the agent, it records the exact correction as an event immediately |
+| 🔄 **Auto-Consolidation** | When memory hits capacity, auto-merges instead of erroring |
 | 🛡️ **Secret Scanning** | API keys, tokens, SSH keys blocked from persistence |
 | 📊 **Memory Aging** | Entries carry timestamps — consolidation knows what's stale |
-| 🏗️ **Two-Tier Memory** | Global + per-project memory, both searchable |
-| 💾 **Extended Store** | Policy-only memories remain searchable in SQLite beyond the Markdown export cap |
+| 🗂️ **Scoped Memory** | Global and per-project scopes remain searchable without cross-project principle injection |
+| 📚 **Event Ledger** | Unlimited searchable episodic history with source dates and evidence |
 | 🎓 **Onboarding** | `/memory-interview` pre-fills your profile on first session |
 
 ## How It Works
@@ -165,9 +167,9 @@ npm rebuild better-sqlite3
 
 Or install Pi with npm so the host runtime and extension install share one Node toolchain.
 
-## Two-Tier Memory Architecture
+## Persistent Memory Architecture
 
-The extension stores memory at two levels:
+The extension keeps global and project scopes, then separates concrete history from active guidance:
 
 | Tier | Location | What goes here | Available when |
 |---|---|---|---|
@@ -188,6 +190,21 @@ System Prompt
 ```
 
 Set `"memoryPolicyStyle"` to `"full"`, `"compact"`, `"custom"`, or `"none"` to choose policy verbosity while keeping policy-only mode. Set `"memoryMode": "legacy-inject"` to restore the old behavior that injects MEMORY.md, USER.md, project memory, and recent failures into the prompt.
+
+## Event Memory and Adaptive Principles
+
+Automatic learning uses a staged memory lifecycle:
+
+1. **Event capture**: background review, session flush, and correction detection append concrete events to `sessions.db`. The event ledger has no total character cap and no automatic age/count eviction.
+2. **Concretion**: after 10 successful background-review captures by default, a bounded batch of pending events is compared with all active principles. The model may add, reinforce, refine, flag a conflict, or form no principle.
+3. **Active principles**: only generalized, source-cited principles enter the 5,000-character adaptive budget and are injected into every agent run. Project principles are injected only in their project.
+4. **User adjudication**: incompatible, ambiguous, invalidly scoped, or over-budget candidates remain inactive in the conflict queue. Run `/memory-conflicts` to inspect both sides and source evidence, then resolve with `accept`, `existing`, or `both`.
+
+Every accepted principle retains links to its source event IDs. `PRINCIPLES.md` is a generated human-readable snapshot; SQLite remains the provenance ledger. Existing Markdown memories are imported as idempotent `legacy-import` events on startup without deleting or rewriting the Markdown files.
+
+Manual `memory_add`, `memory_replace`, and `memory_remove` remain available for deliberate curation of the legacy Markdown core. Automatic learning does not use those tools when event memory is enabled.
+
+By default, the system prompt contains the memory policy, relevant adaptive principles, and finally user-pinned standing instructions. Standing instructions remain the strongest persistent layer because only the user can write them.
 
 ## Standing Instructions
 
@@ -232,22 +249,26 @@ The agent learns from failures, corrections, and insights — just like humans d
 
 ### How It Works
 
-1. **Auto-detection**: Background review extracts failures from conversations
-2. **Correction capture**: When you correct the agent, it saves what went wrong
-3. **Search guidance**: The memory policy tells the agent when to search failures instead of injecting them by default
-4. **Searchable**: Use `memory_search("auth", category: "failure")` to find past failures
+1. **Auto-detection**: Background review records concrete failures and outcomes in the episodic ledger
+2. **Correction capture**: A correction is saved immediately with the user's verbatim evidence
+3. **Concretion**: Repeated or generalizable evidence may form an adaptive principle; one-off details remain events
+4. **Searchable**: Use `memory_search("auth", category: "failure")` to find source events and legacy memories
+5. **Conflict-safe**: Contradictory principles remain inactive until `/memory-conflicts` records the user's decision
 
 ### Example
 
 ```
 User: No, use pnpm not npm
-Agent: [saves correction memory]
+Agent: [records the correction and exact quote as an episodic event]
+
+After later evidence supports a stable preference:
+Agent: [concretion proposes "Use pnpm when the user's package-manager preference applies"]
 
 Next session:
-Agent: "I remember you prefer pnpm over npm. Let me use that."
+Agent: [loads the accepted adaptive principle, or searches the source event when details matter]
 ```
 
-The agent learns from its mistakes so you don't have to repeat yourself.
+The event stays searchable even if it never warrants a general rule. Generalized behavior changes only through source-cited concretion or explicit user curation.
 
 Memory blocks are wrapped in `<memory-context>` XML tags with a guard note ("NOT new user input") to prevent the LLM from treating stored facts as instructions.
 
@@ -351,7 +372,9 @@ This lets Pi discover project skills as native skills without copying them into 
 | **memory** | `MEMORY.md` | Agent's notes — env facts, project conventions, tool quirks, lessons learned | 5,000 chars |
 | **user** | `USER.md` | User profile — name, preferences, communication style, habits | 5,000 chars |
 | **skills** | `~/.pi/agent/pi-hermes-memory/skills/<slug>/SKILL.md` or `projects-memory/<project>/skills/<slug>/SKILL.md` | Procedures — *how* to debug, deploy, test, or fix something | Unlimited |
-| **extended** | `sessions.db` | Searchable memories beyond the core limit | Unlimited |
+| **principles** | `PRINCIPLES.md` + `sessions.db` | Generalized, source-cited behavioral defaults distilled from events | 5,000 injected chars by default |
+| **events** | `sessions.db` | Concrete outcomes, corrections, failures, decisions, facts, and evidence | Unlimited; append-only by policy |
+| **extended** | `sessions.db` | Legacy Markdown mirror plus episodic event search | Unlimited |
 | **sessions** | `sessions.db` | Past conversation history (searchable via FTS5) | Unlimited |
 
 ### Session History Search
@@ -361,7 +384,7 @@ By default, the extension indexes your Pi session history into a SQLite database
 | Tool | What it does |
 |---|---|---|
 | `session_search` | Search past conversations — "what did we discuss about auth?" |
-| `memory_search` | Search extended memory store — unlimited capacity, keyword-based |
+| `memory_search` | Search episodic events first, then legacy/core mirrors; event results include IDs, dates, sources, and evidence |
 
 Search behavior notes:
 - Multi-word natural-language queries are supported for both `memory_search` and `session_search`.
@@ -377,24 +400,23 @@ Session history is indexed automatically during the active session and on sessio
 
 For users who prefer source anchors over snippets, `sessionSearch.variant` can be set to `anchors`. In that opt-in mode, the same `session_search` tool reads session JSONL files directly and accepts a Markdown request with fields such as `from`, `to`, `cwd`, and `limit`, plus `all`, `any`, and `exclude` lists. It returns plain text with `count`, an optional `message`, and compact `path:startLine-endLine` style anchors with short reasons instead of summaries or previews.
 
-### Extended Memory Store
+### Episodic and Legacy Search
 
-The extension keeps Markdown memory as the human-readable source of truth, and mirrors successful writes into the SQLite-backed search store used by `memory_search`.
+`memory_search` searches the append-only episodic event ledger first and then fills any remaining result budget from the legacy/core Markdown mirror. Exact duplicate content is shown once. Event results carry an `E<id>` source anchor, occurrence time, event kind, capture source, and evidence quote when available.
 
-This means:
-- Fresh `memory_add`, `memory_replace`, and `memory_remove` writes become searchable immediately
-- Older Markdown entries can be backfilled with `/memory-sync-markdown`
-- SQLite search does **not** replace the core Markdown limit
+Manual Markdown writes are still mirrored into SQLite, so fresh `memory_add`, `memory_replace`, and `memory_remove` changes remain searchable. Older Markdown entries can be backfilled with `/memory-sync-markdown`; startup also imports them into the event ledger once as `legacy-import` events without modifying the files.
 
-This is the **hybrid memory architecture**:
-- **Core memory** (MEMORY.md/USER.md/failures.md): Human-readable, size-limited, searchable by default
-- **SQLite memory mirror/store** (`sessions.db`): Searchable on demand via `memory_search`
+This produces four distinct persistence roles:
+- **Episodic events** (`memory_events` in `sessions.db`): concrete, searchable, uncapped history used as evidence
+- **Adaptive principles** (`principles` + `principle_sources`): generalized, source-cited defaults within the active prompt budget
+- **Standing instructions** (`STANDING.md`): user-authored hard persistent directives
+- **Legacy curated memory** (`MEMORY.md`, `USER.md`, `failures.md`, project `MEMORY.md`): compatible manual core stores and search mirrors
 
-Important: if core Markdown memory is full and consolidation cannot free space, the write still fails. This package does **not** silently spill failed core-memory writes into SQLite-only storage.
+No failed Markdown write is silently treated as an event. Likewise, automatic event capture never silently promotes a concrete event into the curated Markdown core.
 
 ### Correction Detection
 
-When you correct the agent, it saves immediately — no waiting for the background review. Examples of corrections the agent detects:
+When you correct the agent, it records a concrete episodic event immediately with the exact user message as evidence. It does not immediately promote that one correction into an active principle or the curated Markdown core. Examples:
 
 | You say | What happens |
 |---|---|
@@ -416,20 +438,22 @@ In `legacy-inject` mode, when memory, user profile, or failure memory hits its c
 
 In `policy-only` mode, SQLite is the query authority, so adds, replacements, and atomic mutation plans can exceed the Markdown export cap without automatic consolidation. You can still trigger consolidation manually with `/memory-consolidate`.
 
-### Tool-Call-Aware Review
+### Event Review and Concretion
 
-Background review triggers based on **activity level**, not just turn count:
+Background review still triggers based on activity level:
 
-- **Every 10 turns** — the default nudge interval
-- **OR every 15 tool calls** — catches complex tasks that involve many reads/edits/bash calls
+- **Every 10 turns** by default
+- **OR every 15 tool calls**
 
-Both counters reset after each review.
+Each successful review appends zero or more concrete events. The counters reset after review. Automatic concretion is a separate threshold: after 10 successful background-review captures that wrote events, the extension compares up to 100 pending events with all active principles. A batch limit bounds LLM context only; unprocessed events remain in the ledger for later batches.
 
-### Direct-Transport LLM Calls (Review, Flush, Correction, Consolidation)
+Run `/memory-concretize` for a manual pass. A pass marks its reviewed batch as concreted even when no principle is warranted, preserving the events while preventing repeated reflection on the same evidence.
 
-By default, background review, session flush, correction save, and the manual `/memory-consolidate` command use an in-process `completeSimple()` side-channel: a small JSON-only prompt, no child `pi` process, and memory writes applied directly by the extension. This keeps the main session's system prompt, tools, and LLM prefix cache intact, and avoids the subprocess path's argv/`--no-extensions` concerns entirely on the common path.
+### Direct-Transport LLM Calls (Event Review, Flush, Concretion)
 
-If direct mode fails (no model, no auth, provider error, unparseable response, or — for consolidation only — a result that didn't actually free any space), it automatically falls back to the legacy `pi -p --no-session` subprocess path. The automatic over-capacity consolidator triggered from `MemoryStore` itself always uses the subprocess path, since it runs without extension-runtime access.
+By default, background event extraction, session flush, event concretion, and the legacy manual `/memory-consolidate` command use an in-process `completeSimple()` side-channel with JSON-only output. Event extraction and concretion proposals are validated and applied by the extension; the model cannot write the database or Markdown directly. If direct transport is unavailable, the event paths fall back to an isolated `pi -p --no-session --no-tools --no-skills --no-context-files` subprocess.
+
+If direct mode fails (no model, no auth, provider error, or unparseable response), event extraction and concretion fall back to the isolated JSON-only subprocess. The automatic over-capacity consolidator for the legacy Markdown core still uses its legacy subprocess path because it runs without extension-runtime access.
 
 The subprocess path is restricted to memory operations by construction. Child `pi -p` processes run with `--tools memory_add,memory_replace,memory_remove` and `--exclude-tools mcp__*`, so a background child cannot edit files, run commands, touch skills, or reach MCP tools even when the fallback model is a weak one. Children skip the injected memory policy, which describes tools a child cannot call, and they keep your project as their working directory because the memory tools bind the project store from it. With file and shell tools unreachable, they can only write memory entries.
 
@@ -454,7 +478,9 @@ This means skills build up naturally over time without you having to ask.
 |---|---|
 | `/memory-insights` | Shows everything stored in memory and user profile |
 | `/memory-skills` | Opens an interactive skills manager for search, multi-select, move, and delete |
-| `/memory-consolidate` | Manually trigger memory consolidation to free space |
+| `/memory-concretize` | Manually reflect over the next pending event batch and update adaptive principles |
+| `/memory-conflicts` | Show pending candidates with both principle text and source-event evidence; resolve with `accept`, `existing`, or `both` |
+| `/memory-consolidate` | Manually consolidate the legacy Markdown core to free space |
 | `/memory-interview` | Answer a few questions to pre-fill your user profile |
 | `/memory-switch-project` | List all project memories and their entry counts |
 | `/memory-index-sessions` | Import past Pi sessions into the search database |
@@ -536,6 +562,12 @@ Create `~/.pi/agent/hermes-memory-config.json`:
   "reviewRecentMessages": 0,
   "reviewEnabled": true,
   "reviewTransport": "direct",
+  "eventMemoryEnabled": true,
+  "concretionEnabled": true,
+  "concretionReviewThreshold": 10,
+  "concretionEventBatchSize": 100,
+  "principleCharLimit": 5000,
+  "principleInjectionEnabled": true,
   "memoryOverflowStrategy": "auto-consolidate",
   "autoConsolidate": true,
   "correctionDetection": true,
@@ -573,15 +605,21 @@ Create `~/.pi/agent/hermes-memory-config.json`:
 | `sessionSearch` | `{ "variant": "legacy" }` | Session search implementation: `legacy` keeps the existing SQLite/FTS snippet search; `anchors` uses the opt-in Markdown request surface and returns compact JSONL line-range anchors from `~/.pi/agent/sessions/` |
 | `sessionRetentionDays` | `0` | Opt-in SQLite session retention, in days. `0` (default) disables pruning entirely and keeps the legacy count-only backfill preflight. When positive, sessions whose JSONL source file was last modified longer ago than the window are pruned from SQLite at startup — **rows only; the JSONL files in `~/.pi/agent/sessions/` are never deleted** — and both the deferred backfill and `/memory-index-sessions` skip files outside the window, so pruned sessions stay pruned instead of being re-indexed |
 | `quickCheckOnOpen` | `true` | Run a full SQLite integrity check asynchronously after opening the database; set to `false` to skip the startup scan (operation-time recovery remains enabled) |
-| `llmModelOverride` | unset | Optional model override for background review (direct and subprocess), correction save, session flush, and consolidation |
+| `llmModelOverride` | unset | Optional model override for background review (direct and subprocess), event extraction, event concretion, correction save, session flush, and consolidation |
 | `llmThinkingOverride` | unset | Optional thinking override for those LLM calls; valid values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. If `llmModelOverride` is set and this is omitted, review/child calls default to `off` |
 | `childExtensionPaths` | unset | Trusted provider/auth extension sources explicitly allowed in isolated child Pi processes. Values are passed to Pi's standard `-e` resolver, so absolute paths, `~/...`, paths relative to the child working directory, and `git:`/`npm:` package sources are supported. Sibling packages matching the `*-oauth-adapter`/`*-auth-adapter` naming convention (including scoped packages, via their `package.json` `pi.extensions` manifest) are detected automatically. This setting is only needed for custom providers or adapters that are not detected. In-process direct transport (the default for review/flush/correction/consolidation) doesn't need it, since it reads whatever provider auth is already registered. |
 | `nudgeInterval` | `10` | Turns between auto-reviews |
 | `nudgeToolCalls` | `15` | Tool calls between auto-reviews (OR with turns) |
 | `reviewRecentMessages` | `0` | Recent messages included in background review (`0` = all) |
 | `reviewEnabled` | `true` | Enable/disable background learning loop |
-| `reviewTransport` | `direct` | LLM transport for background review, session flush, correction save, and manual consolidation: `direct` uses in-process `completeSimple()` with subprocess fallback; `subprocess` forces legacy `pi -p` only |
+| `reviewTransport` | `direct` | LLM transport for background review, event extraction, event concretion, session flush, correction save, and manual consolidation: `direct` uses in-process `completeSimple()` with subprocess fallback; `subprocess` forces legacy `pi -p` only |
 | `memoryOverflowStrategy` | `auto-consolidate` | Legacy-inject behavior when a Markdown memory file reaches its character limit: `auto-consolidate` runs the existing consolidation flow; `reject` returns an error; `fifo-evict` rotates older entries in file order until the new entry fits |
+| `eventMemoryEnabled` | `true` | Route automatic review, flush, and correction learning into the append-only SQLite event ledger instead of directly mutating core Markdown |
+| `concretionEnabled` | `true` | Enable automatic and manual reflection from pending events into adaptive principles |
+| `concretionReviewThreshold` | `10` | Successful background-review captures that wrote pending events before automatic concretion; must be a positive integer |
+| `concretionEventBatchSize` | `100` | Maximum pending events included in one concretion prompt; this is a context bound, not a storage/retention limit |
+| `principleCharLimit` | `5000` | Maximum active adaptive-principle characters for the shared plus current-project prompt view; over-budget candidates require user resolution |
+| `principleInjectionEnabled` | `true` | Inject accepted global, user, and current-project adaptive principles on every agent run |
 | `autoConsolidate` | `true` | Legacy alias for `memoryOverflowStrategy` when `memoryOverflowStrategy` is not set (`true` = `auto-consolidate`, `false` = `reject`) |
 | `consolidationTimeoutMs` | `180000` | Maximum time in milliseconds for a consolidation run (auto and `/memory-consolidate` alike). Also bounds the TOTAL time of a chunked consolidation trigger, so a trigger never blocks longer than the single call it replaced. Configured values are used verbatim; a consolidation pays child-process boot plus a full LLM turn, so values below the default are frequently killed mid-run and log a warning at startup |
 | `consolidationChunking` | `false` | Enables chunked subprocess consolidation: stores whose entries exceed `consolidationChunkChars` are consolidated in bounded rounds with per-round timeouts and resume-from-disk, instead of one whole-store child call. Off by default — enable it if whole-store consolidations time out on your model. Has no effect on the direct in-process transport |
@@ -695,7 +733,8 @@ native install scripts are disabled because the fixture writes no memories.
 ├── pi-hermes-memory/      ← Global extension storage root
 │   ├── MEMORY.md          ← Agent's personal notes (env facts, patterns, lessons)
 │   ├── USER.md            ← User profile (name, preferences, habits)
-│   ├── sessions.db        ← SQLite database (session history + extended memory)
+│   ├── PRINCIPLES.md       ← Generated snapshot of active principles and pending conflicts
+│   ├── sessions.db         ← Sessions, legacy mirrors, append-only events, principles, provenance, conflicts
 │   ├── skills/            ← Global extension-managed skills
 │   │   ├── debug-typescript-errors/
 │   │   │   └── SKILL.md
@@ -718,15 +757,15 @@ These are plain markdown files. You can read and edit them directly if you want 
 
 If you are upgrading from a version that stored project memory directly at `~/.pi/agent/<project>/MEMORY.md`, the extension copies or merges those entries into `~/.pi/agent/projects-memory/<project>/MEMORY.md` on startup. The old folders are left in place as a backup.
 
-The `sessions.db` SQLite database stores session history and extended memory entries. It's searchable via FTS5 full-text search.
+The `sessions.db` SQLite database stores session history, the legacy Markdown search mirror, append-only events, concretion runs, adaptive principles, source links, and conflict decisions. FTS5 makes both sessions and memory events searchable.
 
 ## Known Limitations
 - **CJK search length**: The trigram tokenizer supports CJK substring search for terms of three or more characters. One- and two-character `memory_search` terms may need a longer phrase or an English/ASCII token.
 
 - **`§` delimiter**: Memory entries are separated by `§` (section sign). If an entry naturally contains `§`, it will be split incorrectly on reload. This is rare in English text but possible. [Hermes uses the same delimiter.]
-- **Background review cost**: Each review cycle costs one full LLM API call via a child `pi -p` process. Correction detection and explicit skill saves can add additional calls when the agent decides they are worth it.
+- **Background review cost**: Each review cycle costs one LLM call. Direct transport is used by default; an isolated child `pi -p` call is used only as fallback or when configured. Automatic concretion adds a separate call when its event-capture threshold is reached.
 - **Session search requires indexing**: Past sessions must be indexed before they're searchable. Run `/memory-index-sessions` to bulk-import, or let the extension auto-index on session shutdown.
-- **Older Markdown memories may need backfill**: If you saved memories before the SQLite mirror existed or search looks stale, run `/memory-sync-markdown`.
+- **Older Markdown memories may need backfill**: If you saved memories before the SQLite mirror existed or search looks stale, run `/memory-sync-markdown`. Startup imports current mirrored entries as `legacy-import` events so they stay searchable in the episodic ledger.
 - **Core memory limits apply in `legacy-inject` mode**: policy-only writes can exceed the Markdown export cap because SQLite is the query authority, while manual `/memory-consolidate` remains available.
 - **System prompts are invisible**: Pi's TUI does not display the system prompt. Use `/memory-preview-context` to inspect whether policy-only or legacy memory injection is active.
 - **Project skill visibility depends on Pi discovery cycles**: project skills are exposed through `resources_discover` using the active project's `skills/` path. If a moved or newly created project skill doesn't show up immediately in a running session, trigger a reload/new session so Pi refreshes discovered resources.

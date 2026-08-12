@@ -40,6 +40,7 @@ import { measureLifecycle } from "../lifecycle-timing.js";
 import { collectMessageParts } from "./message-parts.js";
 import { execChildPrompt, resolveChildPiModel } from "./pi-child-process.js";
 import { runDirectMemoryCompletion, usesDirectTransport } from "./review-memory-ops.js";
+import { extractAndCaptureEvents } from "./event-extraction.js";
 import { resolveProjectName, resolveProjectStore, type ProjectNameRef, type ProjectStoreRef } from "../project-context.js";
 
 /** Do not spawn pi -p when leftover time is below this, floored by the budget itself. */
@@ -147,6 +148,7 @@ export function setupSessionFlush(
   projectName: ProjectNameRef = null,
   deps: {
     runDirectMemoryCompletion?: typeof runDirectMemoryCompletion;
+    extractAndCaptureEvents?: typeof extractAndCaptureEvents;
     now?: () => number;
     ensureMemoryReady?: EnsureMemoryReady;
   } = {},
@@ -154,6 +156,7 @@ export function setupSessionFlush(
   let userTurnCount = 0;
   const now = deps.now ?? Date.now;
   const runDirect = deps.runDirectMemoryCompletion ?? runDirectMemoryCompletion;
+  const captureEvents = deps.extractAndCaptureEvents ?? extractAndCaptureEvents;
 
   pi.on("message_end", async (event, _ctx) => {
     if (event.message.role === "user") userTurnCount++;
@@ -186,6 +189,27 @@ export function setupSessionFlush(
       const activeProjectName = resolveProjectName(projectName);
       if (signal?.aborted) return;
       if (timeoutMs <= 0) return; // explicit disable or degenerate config: silent
+
+      // Fork layer: append-only episodic capture replaces the markdown flush.
+      if (config.eventMemoryEnabled !== false && dbManager) {
+        const sessionManager = ctx.sessionManager as typeof ctx.sessionManager & {
+          getHeader?: () => { id?: string } | null;
+        };
+        await captureEvents(
+          pi,
+          ctx,
+          dbManager,
+          config,
+          {
+            parts,
+            projectName: activeProjectName,
+            source: "session-flush",
+            sourceSessionId: sessionManager.getHeader?.()?.id ?? null,
+          },
+          { timeoutMs, signal },
+        );
+        return;
+      }
 
       const started = now();
 
