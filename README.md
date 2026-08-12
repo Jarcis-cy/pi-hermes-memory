@@ -197,7 +197,7 @@ Automatic learning uses a staged memory lifecycle:
 
 1. **Event capture**: background review, session flush, and correction detection append concrete events to `sessions.db`. The event ledger has no total character cap and no automatic age/count eviction.
 2. **Concretion**: after 10 successful background-review captures by default, a bounded batch of pending events is compared with all active principles. The model may add, reinforce, refine, flag a conflict, or form no principle.
-3. **Active principles**: only generalized, source-cited principles enter the 5,000-character adaptive budget and are injected into every agent run. Project principles are injected only in their project.
+3. **Active principles**: only generalized, source-cited principles enter the 20,000-character adaptive budget by default (roughly 5,000 tokens for the current English-heavy output; use `principleCharLimit: 40000` for roughly 10,000 tokens) and are injected into every agent run. Project principles are injected only in their project.
 4. **User adjudication**: incompatible, ambiguous, invalidly scoped, or over-budget candidates remain inactive in the conflict queue. Run `/memory-conflicts` to inspect both sides and source evidence, then resolve with `accept`, `existing`, or `both`.
 
 Every accepted principle retains links to its source event IDs. `PRINCIPLES.md` is a generated human-readable snapshot; SQLite remains the provenance ledger. Existing Markdown memories are imported as idempotent `legacy-import` events on startup without deleting or rewriting the Markdown files.
@@ -372,7 +372,7 @@ This lets Pi discover project skills as native skills without copying them into 
 | **memory** | `MEMORY.md` | Agent's notes — env facts, project conventions, tool quirks, lessons learned | 5,000 chars |
 | **user** | `USER.md` | User profile — name, preferences, communication style, habits | 5,000 chars |
 | **skills** | `~/.pi/agent/pi-hermes-memory/skills/<slug>/SKILL.md` or `projects-memory/<project>/skills/<slug>/SKILL.md` | Procedures — *how* to debug, deploy, test, or fix something | Unlimited |
-| **principles** | `PRINCIPLES.md` + `sessions.db` | Generalized, source-cited behavioral defaults distilled from events | 5,000 injected chars by default |
+| **principles** | `PRINCIPLES.md` + `sessions.db` | Generalized, source-cited behavioral defaults distilled from events | 20,000 injected chars by default (roughly 5,000 tokens) |
 | **events** | `sessions.db` | Concrete outcomes, corrections, failures, decisions, facts, and evidence | Unlimited; append-only by policy |
 | **extended** | `sessions.db` | Legacy Markdown mirror plus episodic event search | Unlimited |
 | **sessions** | `sessions.db` | Past conversation history (searchable via FTS5) | Unlimited |
@@ -566,7 +566,7 @@ Create `~/.pi/agent/hermes-memory-config.json`:
   "concretionEnabled": true,
   "concretionReviewThreshold": 10,
   "concretionEventBatchSize": 100,
-  "principleCharLimit": 5000,
+  "principleCharLimit": 20000,
   "principleInjectionEnabled": true,
   "memoryOverflowStrategy": "auto-consolidate",
   "autoConsolidate": true,
@@ -618,7 +618,7 @@ Create `~/.pi/agent/hermes-memory-config.json`:
 | `concretionEnabled` | `true` | Enable automatic and manual reflection from pending events into adaptive principles |
 | `concretionReviewThreshold` | `10` | Successful background-review captures that wrote pending events before automatic concretion; must be a positive integer |
 | `concretionEventBatchSize` | `100` | Maximum pending events included in one concretion prompt; this is a context bound, not a storage/retention limit |
-| `principleCharLimit` | `5000` | Maximum active adaptive-principle characters for the shared plus current-project prompt view; over-budget candidates require user resolution |
+| `principleCharLimit` | `20000` | Maximum active adaptive-principle characters for the shared plus current-project prompt view; roughly 5,000 tokens for the current English-heavy output. Set `40000` for roughly 10,000 tokens. Over-budget candidates require user resolution |
 | `principleInjectionEnabled` | `true` | Inject accepted global, user, and current-project adaptive principles on every agent run |
 | `autoConsolidate` | `true` | Legacy alias for `memoryOverflowStrategy` when `memoryOverflowStrategy` is not set (`true` = `auto-consolidate`, `false` = `reject`) |
 | `consolidationTimeoutMs` | `180000` | Maximum time in milliseconds for a consolidation run (auto and `/memory-consolidate` alike). Also bounds the TOTAL time of a chunked consolidation trigger, so a trigger never blocks longer than the single call it replaced. Configured values are used verbatim; a consolidation pays child-process boot plus a full LLM turn, so values below the default are frequently killed mid-run and log a warning at startup |

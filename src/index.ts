@@ -55,7 +55,7 @@ import { registerPreviewContextCommand } from "./handlers/preview-context.js";
 import { registerStandingPinCommand } from "./handlers/standing-pin.js";
 import { isMemoryChildProcess } from "./handlers/pi-child-process.js";
 import { StandingInstructions } from "./store/standing-instructions.js";
-import { PRINCIPLES_FILE, STANDING_FILE } from "./constants.js";
+import { DEFAULT_PRINCIPLE_CHAR_LIMIT, PRINCIPLES_FILE, STANDING_FILE } from "./constants.js";
 import { loadConfig } from "./config.js";
 import { shouldWarnAutoConsolidationFailure } from "./auto-consolidation-warning.js";
 import { detectProject, detectProjectSkills } from "./project.js";
@@ -409,7 +409,7 @@ export default function (pi: ExtensionAPI) {
   // ── 9. Register commands ──
   registerInsightsCommand(memoryPi, store, projectStoreRef, projectNameRef, dbManager);
   registerConcretionCommand(memoryPi, dbManager, globalDir, config);
-  registerMemoryConflictsCommand(memoryPi, dbManager, globalDir, config.principleCharLimit ?? 5000);
+  registerMemoryConflictsCommand(memoryPi, dbManager, globalDir, config.principleCharLimit ?? DEFAULT_PRINCIPLE_CHAR_LIMIT);
   registerSkillsCommand(pi, skillStore);
   registerInterviewCommand(memoryPi, store);
   registerSwitchProjectCommand(pi, config);
