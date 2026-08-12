@@ -50,7 +50,7 @@ import { migrateThenSyncMarkdownMemories, registerSyncMarkdownMemoriesCommand } 
 import { registerPreviewContextCommand } from "./handlers/preview-context.js";
 import { registerStandingPinCommand } from "./handlers/standing-pin.js";
 import { StandingInstructions } from "./store/standing-instructions.js";
-import { STANDING_FILE, PRINCIPLES_FILE } from "./constants.js";
+import { DEFAULT_PRINCIPLE_CHAR_LIMIT, STANDING_FILE, PRINCIPLES_FILE } from "./constants.js";
 import { registerMemoryConflictsCommand } from "./handlers/memory-conflicts.js";
 import { registerConcretionCommand } from "./handlers/concretion.js";
 import {
@@ -308,7 +308,7 @@ export default function (pi: ExtensionAPI) {
   registerSwitchProjectCommand(pi, config);
   registerLearnMemoryCommand(pi);
   registerConcretionCommand(pi, dbManager, globalDir, config);
-  registerMemoryConflictsCommand(pi, dbManager, globalDir, config.principleCharLimit ?? 5000);
+  registerMemoryConflictsCommand(pi, dbManager, globalDir, config.principleCharLimit ?? DEFAULT_PRINCIPLE_CHAR_LIMIT);
   registerSyncMarkdownMemoriesCommand(pi, dbManager, globalDir, config.projectsMemoryDir, agentRoot);
   registerPreviewContextCommand(
     pi,

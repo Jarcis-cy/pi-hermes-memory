@@ -92,7 +92,8 @@ export interface MemoryConfig {
   concretionReviewThreshold?: number;
   /** Maximum pending events considered in one concretion run. Default: 100 */
   concretionEventBatchSize?: number;
-  /** Maximum characters across active adaptive principles. Default: 5000 */
+  /** Maximum characters across active adaptive principles. Default: 20000
+   * (roughly 5000 tokens for English-heavy principles); set 40000 for roughly 10000 tokens. */
   principleCharLimit?: number;
   /** Inject accepted adaptive principles into every agent run. Default: true */
   principleInjectionEnabled?: boolean;

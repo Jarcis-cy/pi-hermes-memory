@@ -14,6 +14,10 @@ export const DEFAULT_PROJECTS_MEMORY_DIR = "projects-memory";
 export const DEFAULT_MEMORY_CHAR_LIMIT = 5000;
 export const DEFAULT_USER_CHAR_LIMIT = 5000;
 
+// A 20,000-character default is roughly a 5,000-token budget for the
+// English-heavy principles this extension currently generates. Keep this as
+// a character limit so behavior stays model/provider independent; users who
+// want roughly 10,000 tokens can set principleCharLimit to 40,000.
 // ─── Learning loop defaults ───
 export const DEFAULT_PROJECT_CHAR_LIMIT = 5000;
 
@@ -24,7 +28,7 @@ export const DEFAULT_REVIEW_RECENT_MESSAGES = 0;
 export const DEFAULT_FLUSH_RECENT_MESSAGES = 0;
 export const DEFAULT_CONCRETION_REVIEW_THRESHOLD = 10;
 export const DEFAULT_CONCRETION_EVENT_BATCH_SIZE = 100;
-export const DEFAULT_PRINCIPLE_CHAR_LIMIT = 5000;
+export const DEFAULT_PRINCIPLE_CHAR_LIMIT = 20000;
 /**
  * A consolidation run pays child-process boot plus a full LLM turn, which
  * routinely exceeds 60s — at the old 60s default the auto path was killed

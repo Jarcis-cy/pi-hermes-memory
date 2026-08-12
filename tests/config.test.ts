@@ -43,7 +43,7 @@ describe("loadConfig", () => {
     assert.strictEqual(config.concretionEnabled, true);
     assert.strictEqual(config.concretionReviewThreshold, 10);
     assert.strictEqual(config.concretionEventBatchSize, 100);
-    assert.strictEqual(config.principleCharLimit, 5000);
+    assert.strictEqual(config.principleCharLimit, 20000);
     assert.strictEqual(config.principleInjectionEnabled, true);
   });
 
@@ -204,7 +204,7 @@ describe("loadConfig", () => {
     const config = loadConfig(TEST_CONFIG_PATH);
     assert.strictEqual(config.concretionReviewThreshold, 10);
     assert.strictEqual(config.concretionEventBatchSize, 100);
-    assert.strictEqual(config.principleCharLimit, 5000);
+    assert.strictEqual(config.principleCharLimit, 20000);
   });
 
   it("handles partial config with all boolean overrides", () => {
