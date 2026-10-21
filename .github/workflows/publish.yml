@@ -1,18 +1,20 @@
 name: Publish to npm
 
-# Three entry points, all converging on the same jobs:
-#   * push a version tag (v0.9.11)  — tag-first release
-#   * publish a GitHub Release      — release-first release (npm's documented pattern)
+# Two entry points, converging on the same jobs:
+#   * publish a GitHub Release      — release-first release (npm's documented pattern); the
+#                                     tag comes from the release, creating one if needed
 #   * workflow_dispatch             — re-run, backport, dry-run, staged publish; also fired
 #                                     by "Prepare release" (npm validates the top-level
 #                                     workflow, so this file must never be a workflow_call)
 #
+# There is deliberately no `push: tags` trigger. Publishing a Release for a new tag
+# pushes that tag as well, so listening to both fired two runs for every release; the
+# second raced the first on the registry check and failed at `npm publish`. A tag
+# pushed by hand starts nothing: publish its Release, or dispatch with `ref: <tag>`.
+#
 # A Release created by this workflow's own `release` job uses GITHUB_TOKEN, which
 # cascades nothing, so the `release` trigger cannot re-enter itself.
 on:
-  push:
-    tags:
-      - "v*"
   release:
     types: [published]
   workflow_dispatch:
@@ -136,9 +138,8 @@ jobs:
               ;;
           esac
 
-          # Already on npm is not a failure: it means another trigger for this
-          # same version got there first (a release and its tag push both fire),
-          # or this is a re-run. Skip publishing and carry on, so the rest of the
+          # Already on npm is not a failure: it means this is a re-run or a second
+          # dispatch for the same version. Skip publishing and carry on, so the rest of the
           # pipeline — notably a missing GitHub Release — still gets completed.
           if npm view "pi-hermes-memory@$version" version >/dev/null 2>&1; then
             echo "already-published=true" >> "$GITHUB_OUTPUT"

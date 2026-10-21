@@ -6,7 +6,7 @@
 
 |Workflow|Trigger|Job|
 |---|---|---|
-|`publish.yml`|push of a `v*` tag, publishing a GitHub Release, `workflow_dispatch`, or a dispatch fired by `release.yml`|verify → publish to npm → GitHub Release|
+|`publish.yml`|publishing a GitHub Release, `workflow_dispatch`, or a dispatch fired by `release.yml`. A pushed tag alone does not trigger it|verify → publish to npm → GitHub Release|
 |`release.yml`|`workflow_dispatch`|bump `package.json`, promote `CHANGELOG.md`, commit to `main`, push the tag, then dispatch `publish.yml`|
 
 Both run on `ubuntu-latest`. See [Runners](#runners) for why.
@@ -18,7 +18,7 @@ Runs against the exact commit being published:
 1. Resolves the target ref (tag, branch or SHA) and the publish mode.
 2. Fails if a `v*` ref does not name exactly the `package.json` version.
 3. Fails if the version is a prerelease published under `latest`.
-4. Marks the version `already-published` if npm has it — **not** a failure: publishing is skipped and the rest of the pipeline still runs, so a re-run (or the second of two triggers) reconciles a missing GitHub Release instead of dying.
+4. Marks the version `already-published` if npm has it — **not** a failure: publishing is skipped and the rest of the pipeline still runs, so a re-run reconciles a missing GitHub Release instead of dying.
 5. `npm ci`, `npm run check` (tsc), `npm test` (732 tests), `npm run check:production` (packs the tarball, installs it without peers, loads it through Pi's jiti loader and runs four loopback completions).
 6. Warns if `CHANGELOG.md` has no section for the version.
 
@@ -83,29 +83,29 @@ Write the `[Unreleased]` section before dispatching; it becomes the release note
 
 ### Release by tag
 
-For a manually prepared release (bump and changelog already merged):
+For a manually prepared release (bump and changelog already merged), push the tag and then start the pipeline for it. Pushing the tag does not start it:
 
 ```bash
 git tag -a v0.9.11 -m v0.9.11
 git push origin v0.9.11
 ```
 
-The tag must match `package.json` exactly, or `verify` fails.
+Then **Actions → Publish to npm → Run workflow** with `ref: v0.9.11` — or publish a GitHub Release for that existing tag. The tag must match `package.json` exactly, or `verify` fails.
 
 ### Release-first: the GitHub Release is the trigger
 
-Publishing a GitHub Release also starts the pipeline (`release: types: [published]`), which is npm's own documented pattern — write the notes in the GitHub UI, hit **Publish release**, and npm publish follows. The tag comes from the release, so the tag↔version guard still applies.
+Publishing a GitHub Release starts the pipeline (`release: types: [published]`), which is npm's own documented pattern — write the notes in the GitHub UI, hit **Publish release**, and npm publish follows. The tag comes from the release, so the tag↔version guard still applies.
 
 **The tradeoff is ordering.** In this path the Release page is public *before* the package is installable. If the publish then fails, the release advertises a version npm does not have until you re-dispatch. The tag-first paths keep the stronger invariant: a release exists only once the package is live on npm.
 
-Both orderings are safe to combine, because the pipeline is idempotent:
+The pipeline is idempotent, so a repeat is safe:
 
-- Whichever signal arrives second finds the version already on npm: publishing is skipped, the run stays green, and no second publish happens even in principle — npm rejects re-publishing a version regardless.
-- Creating a release for a **new** tag emits both a `release` and a `push` event, so expect two runs for that flow. One publishes; the other is the no-op described above.
+- A second run for a version already on npm finds it there: publishing is skipped, the run stays green, and no second publish happens even in principle — npm rejects re-publishing a version regardless.
+- Creating a release for a **new** tag also pushes that tag, but a tag push does not trigger `publish.yml`, so exactly one run starts. That single trigger is the point: two simultaneous runs race on the registry check (it can lag by well over 20 seconds) and the loser fails at `npm publish`.
 - A release you wrote by hand keeps its own notes: the `release` job finds it and leaves it untouched rather than overwriting it with the `CHANGELOG.md` section.
 - A release created by our own workflow uses `GITHUB_TOKEN`, which cascades nothing, so it cannot re-trigger this workflow.
 
-Prereleases published through the Releases UI default to the `next` dist-tag. A tag push or dispatch has no such context and must name it explicitly.
+Prereleases published through the Releases UI default to the `next` dist-tag. A dispatch has no such context and must name it explicitly.
 
 ### Re-run, backport or dry-run
 
@@ -129,7 +129,7 @@ Version `0.10.0-beta.1` plus `dist-tag: next`. A prerelease with `latest` is rej
 |`publish` failed after `verify` passed|Re-dispatch `publish.yml` with the same `ref`; if the version did land, the publish step is skipped and the run still finishes green|
 |Package published, GitHub Release missing|Re-dispatch `publish.yml` with the same `ref` — publishing is skipped and the Release is created from the `CHANGELOG.md` section|
 |Bumped and tagged, but publish failed|The tag exists; re-dispatch `publish.yml` with `ref: v<version>`|
-|Two runs for one release|Expected when a release creates its own tag (both `release` and `push` fire): one publishes, the other is a no-op|
+|`npm error You cannot publish over the previously published versions`|Two publishes ran for one version within the registry's propagation delay (for example a dispatch right after publishing a Release). The first one published; the failed run is harmless — confirm with `npm view pi-hermes-memory version`|
 |`403` from npm on publish|The trusted publisher is missing or does not allow `npm publish` — see [One-time setup](#one-time-setup-the-npm-trusted-publisher)|
 
 ## Runners
