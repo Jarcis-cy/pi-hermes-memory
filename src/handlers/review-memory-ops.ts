@@ -2,7 +2,7 @@
  * Parse and apply structured memory operations from direct background review.
  */
 
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
 import { completeSimple, type Message, type SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MemoryStore } from "../store/memory-store.js";
@@ -737,6 +737,22 @@ function notifyThinkingChannelProvider(
   );
 }
 
+/** `ModelRegistry.streamSimple` as hosts >= 0.86.0 expose it (earendil-works/pi#8964).
+ * Older hosts, and the pinned dev dependency, type the registry without it. */
+type RegistryStreamSimple = (
+  model: Model<Api>,
+  context: Context,
+  options?: SimpleStreamOptions,
+) => { result(): Promise<AssistantMessage> };
+
+/** Hosts before 0.86.0 cannot stream through the model registry, so the global
+ * completion cannot resolve extension-registered providers. The raw error names
+ * an api id; this tells the user what to do about it. */
+function withHostUpgradeHint(message: string, hostCanStream: boolean): string {
+  if (hostCanStream || !/No API provider registered for api/i.test(message)) return message;
+  return `${message} (this provider is registered by an extension; upgrade Pi to 0.86.0 or later so direct memory completions can use it)`;
+}
+
 export async function runDirectMemoryCompletion(
   ctx: DirectReviewContext,
   store: MemoryStore,
@@ -756,9 +772,8 @@ export async function runDirectMemoryCompletion(
   // model runtime, not in pi-ai's global api registry, so route through the
   // registry when it can stream and keep the global call as the fallback.
   // Older hosts type `ModelRegistry` without `streamSimple`, hence the structural cast.
-  const registry = ctx.modelRegistry as unknown as {
-    streamSimple?: (...args: Parameters<typeof completeSimple>) => { result(): ReturnType<typeof completeSimple> };
-  } | undefined;
+  const registry = ctx.modelRegistry as unknown as { streamSimple?: RegistryStreamSimple } | undefined;
+  const hostCanStream = typeof registry?.streamSimple === "function";
   const complete: typeof completeSimple = deps.completeSimple
     ?? (typeof registry?.streamSimple === "function"
       ? (model, context, options) => registry.streamSimple!(model, context, options).result()
@@ -823,8 +838,14 @@ export async function runDirectMemoryCompletion(
         request,
         buildDirectReviewCompletionOptions(model, requestAuth, thinking, controller.signal, sessionId),
       );
-      if (response.stopReason === "error" && isAuthRejection(response.errorMessage ?? "")) {
-        throw new Error(response.errorMessage ?? "error");
+      // Pi reports provider failures as an error message, not a throw: HTTP
+      // errors from any provider, and setup failures (unknown or unconfigured
+      // provider) from hosts that stream through the model registry. Settling
+      // them here keeps the cause on the result; left alone they parse as
+      // `parse_error` with no error text. Auth rejections take the same route
+      // so the rotation retry below still sees them.
+      if (response.stopReason === "error") {
+        throw new Error(response.errorMessage || "provider returned an error response");
       }
       return response;
     };
@@ -961,7 +982,7 @@ export async function runDirectMemoryCompletion(
           ok: false,
           appliedCount: 0,
           fallbackReason: "provider_error",
-          error: err instanceof Error ? err.message : String(err),
+          error: withHostUpgradeHint(err instanceof Error ? err.message : String(err), hostCanStream),
         };
       }
       if (mi < models.length - 1) { clearTimeout(timeout); continue; }

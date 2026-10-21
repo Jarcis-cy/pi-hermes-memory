@@ -439,6 +439,37 @@ describe("provider auth resolution", () => {
       assert.strictEqual(isAuthRejection(message), false, message);
     }
   });
+
+  it("keeps the cause of an error response instead of settling it as parse_error", async () => {
+    // Pi reports provider failures (and registry setup failures such as an
+    // unconfigured provider) as an error message with no content, not a throw.
+    const complete = async () => ({ stopReason: "error", content: [], errorMessage: "HTTP 500: upstream exploded" });
+
+    const result = await runReview(registryWithHeaderAuth({ Authorization: "Bearer k" }), complete);
+
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.fallbackReason, "provider_error");
+    assert.match(result.error ?? "", /upstream exploded/);
+  });
+
+  it("points to a Pi upgrade only when the host cannot stream through the registry", async () => {
+    const unregistered = async () => {
+      throw new Error("No API provider registered for api: kiro-api");
+    };
+
+    const oldHost = await runReview(registryWithHeaderAuth({ Authorization: "Bearer k" }), unregistered);
+    assert.strictEqual(oldHost.fallbackReason, "provider_error");
+    assert.match(oldHost.error ?? "", /No API provider registered for api: kiro-api/);
+    assert.match(oldHost.error ?? "", /upgrade Pi to 0\.86\.0/);
+
+    // A host that can stream has nothing to upgrade: the hint would mislead.
+    const newHost = await runReview(
+      { ...registryWithHeaderAuth({ Authorization: "Bearer k" }), streamSimple: () => ({ result: async () => ({}) }) },
+      unregistered,
+    );
+    assert.strictEqual(newHost.fallbackReason, "provider_error");
+    assert.doesNotMatch(newHost.error ?? "", /upgrade Pi/);
+  });
 });
 
 describe("fallback model chain", () => {
