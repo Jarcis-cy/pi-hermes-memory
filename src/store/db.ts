@@ -1134,6 +1134,7 @@ export class DatabaseManager {
   private ensureLegacySchemaColumns(db: DatabaseLike): void {
     this.ensureMemoriesColumns(db);
     this.ensureMemoryEventsColumns(db);
+    this.ensurePrinciplesColumns(db);
     this.ensureSessionsColumns(db);
   }
 
@@ -1163,6 +1164,28 @@ export class DatabaseManager {
     }
     if (!names.has('last_hit_at')) {
       db.exec('ALTER TABLE memories ADD COLUMN last_hit_at DATE');
+    }
+  }
+
+  private ensurePrinciplesColumns(db: DatabaseLike): void {
+    const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='principles'").get() as { name: string } | undefined;
+    if (!tableExists) return;
+
+    const names = this.getColumnNames(db, 'principles');
+    if (!names.has('hit_count')) {
+      db.exec('ALTER TABLE principles ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!names.has('last_hit_at')) {
+      db.exec('ALTER TABLE principles ADD COLUMN last_hit_at DATE');
+    }
+    if (!names.has('applied_count')) {
+      db.exec('ALTER TABLE principles ADD COLUMN applied_count INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!names.has('violated_count')) {
+      db.exec('ALTER TABLE principles ADD COLUMN violated_count INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!names.has('last_feedback_at')) {
+      db.exec('ALTER TABLE principles ADD COLUMN last_feedback_at DATE');
     }
   }
 

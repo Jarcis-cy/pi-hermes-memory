@@ -103,6 +103,13 @@ export interface AdaptivePrinciple {
   createdAt: string;
   updatedAt: string;
   sourceEventIds: number[];
+  /** Times memory_search returned this principle (cold recall). */
+  hitCount: number;
+  lastHitAt: string | null;
+  /** Review verdicts: how often the run clearly followed / ignored it. */
+  appliedCount: number;
+  violatedCount: number;
+  lastFeedbackAt: string | null;
 }
 
 export type ConcretionCandidateAction = "add" | "reinforce" | "refine" | "merge" | "conflict" | "none";
@@ -196,6 +203,11 @@ function mapPrincipleRow(row: Record<string, unknown>, sourceEventIds: number[] 
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     sourceEventIds,
+    hitCount: row.hit_count == null ? 0 : Number(row.hit_count),
+    lastHitAt: cleanNullable(row.last_hit_at as string | null),
+    appliedCount: row.applied_count == null ? 0 : Number(row.applied_count),
+    violatedCount: row.violated_count == null ? 0 : Number(row.violated_count),
+    lastFeedbackAt: cleanNullable(row.last_feedback_at as string | null),
   };
 }
 
@@ -690,6 +702,73 @@ function relevantPrincipleIdsForCandidate(
 
 /** Jaccard similarity at or above this is "the same rule stated twice". */
 const PRINCIPLE_NEAR_DUPLICATE_THRESHOLD = 0.85;
+
+/** Record one cold recall per principle (batched). Failures never break search. */
+export function recordPrincipleHits(dbManager: DatabaseManager, ids: number[]): void {
+  if (ids.length === 0) return;
+  const db = dbManager.getDb();
+  const placeholders = ids.map(() => "?").join(", ");
+  db.prepare(
+    `UPDATE principles SET hit_count = hit_count + 1, last_hit_at = ? WHERE id IN (${placeholders})`,
+  ).run(todayDate(), ...ids);
+}
+
+/**
+ * Record review verdicts about injected principles: a follow counts as a small
+ * reinforcement, a violation as a loud one. Both are prehension events, so they
+ * stamp last_feedback_at; only violations are loud because ignoring a stated
+ * default is the case worth resurfacing.
+ */
+export function recordPrincipleFeedback(
+  dbManager: DatabaseManager,
+  feedback: { applied?: number[]; violated?: number[] },
+): { applied: number; violated: number } {
+  const applied = [...new Set(feedback.applied ?? [])];
+  const violated = [...new Set(feedback.violated ?? [])];
+  if (applied.length === 0 && violated.length === 0) return { applied: 0, violated: 0 };
+  const db = dbManager.getDb();
+  const stamp = todayDate();
+  const run = (ids: number[], column: "applied_count" | "violated_count") => {
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => "?").join(", ");
+    const res = db.prepare(
+      `UPDATE principles SET ${column} = ${column} + 1, last_feedback_at = ? WHERE id IN (${placeholders}) AND status = 'active'`,
+    ).run(stamp, ...ids);
+    return Number(res.changes ?? 0);
+  };
+  const transaction = db.transaction?.(() => ({ applied: run(applied, "applied_count"), violated: run(violated, "violated_count") }));
+  const result = transaction ? transaction() : { applied: run(applied, "applied_count"), violated: run(violated, "violated_count") };
+  return result;
+}
+
+/** Recency half-life for principle strength: an untouched principle halves ~8 weeks. */
+const PRINCIPLE_STRENGTH_HALF_LIFE_DAYS = 56;
+
+/**
+ * Derived strength in [0, ~3]: 1 base, halved for every idle half-life since the
+ * principle was last felt, boosted by recall and follow counts, and boosted
+ * harder by recent violations (a stated default that keeps getting ignored is
+ * the one worth resurfacing, not the one to bury).
+ *
+ * Deterministic and pure so ranking stays reproducible; `now` is injectable for
+ * tests. Never used to delete anything — strength only orders selection.
+ */
+export function principleStrength(principle: AdaptivePrinciple, now: Date = new Date()): number {
+  const daysSince = (value: string | null): number | null => {
+    if (!value) return null;
+    const then = Date.parse(value.length === 10 ? `${value}T00:00:00.000Z` : value);
+    if (Number.isNaN(then)) return null;
+    return Math.max(0, (now.getTime() - then) / 86_400_000);
+  };
+  const idle = daysSince(principle.lastHitAt ?? principle.lastFeedbackAt ?? principle.updatedAt) ?? 0;
+  const recency = Math.pow(0.5, idle / PRINCIPLE_STRENGTH_HALF_LIFE_DAYS);
+  const follow = Math.log1p(Math.max(0, principle.hitCount) + Math.max(0, principle.appliedCount)) / Math.LN2;
+  const violationAge = daysSince(principle.lastFeedbackAt) ?? Number.POSITIVE_INFINITY;
+  const violationBoost = principle.violatedCount > 0 && violationAge <= 30
+    ? Math.min(1.5, 0.5 * principle.violatedCount)
+    : 0;
+  return Number((recency + follow + violationBoost).toFixed(4));
+}
 
 /** Highest-scoring active principle in the same scope that restates `content`. */
 function findNearDuplicatePrinciple(

@@ -243,6 +243,9 @@ describe('registerMemorySearchTool', () => {
     assert.match(hit.content[0].text, /📐 P\d+ \[global\]/);
     assert.match(hit.content[0].text, /Adaptation principle/);
 
+    const row = dbManager.getDb().prepare("SELECT hit_count FROM principles ORDER BY id LIMIT 1").get() as { hit_count: number };
+    assert.ok(row.hit_count >= 1, "cold recall must be recorded as a prehension");
+
     // 分类过滤只描述记忆/事件库，原则不参与
     const categorized = await capturedTool.execute("tc-principle-cat", { query: "consumer field path", category: "failure" });
     assert.doesNotMatch(categorized.content[0].text, /Adaptation principle/);

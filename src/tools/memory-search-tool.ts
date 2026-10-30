@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { DatabaseManager } from '../store/db.js';
 import { searchMemories, getMemoryStats, recordSearchHits } from '../store/sqlite-memory-store.js';
-import { recordEventHits, searchMemoryEvents, searchPrinciples } from '../store/event-memory-store.js';
+import { recordEventHits, recordPrincipleHits, searchMemoryEvents, searchPrinciples } from '../store/event-memory-store.js';
 import type { MemoryCategory } from '../types.js';
 import { createSharedToolResultRenderer } from './shared-output-view.js';
 import { searchResultView } from './tool-result-views.js';
@@ -120,10 +120,11 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
       // batched counter UPDATE per search. Must never break the read path.
       // Records hits for extended-store entries; episodic events carry their
       // own tracking on the event ledger.
-      if (options.usageTrackingEnabled !== false && (legacy.length > 0 || events.length > 0)) {
+      if (options.usageTrackingEnabled !== false && (legacy.length > 0 || events.length > 0 || principles.length > 0)) {
         try {
           if (legacy.length > 0) recordSearchHits(dbManager, legacy.map((entry) => entry.id));
           if (events.length > 0) recordEventHits(dbManager, events.map((event) => event.id));
+          if (principles.length > 0) recordPrincipleHits(dbManager, principles.map((entry) => entry.principle.id));
         } catch (err) {
           console.warn(`[pi-hermes-memory] usage-hit recording failed (search result unaffected): ${err instanceof Error ? err.message : String(err)}`);
         }

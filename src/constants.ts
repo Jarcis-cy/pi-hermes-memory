@@ -289,6 +289,13 @@ Operation fields:
 - category: for failure target — failure | correction | insight | convention | tool-quirk | preference
 - failure_reason: optional context for failure entries
 
+Optional principle feedback — include only when this run makes it clear:
+- "principle_feedback": {"applied": [ids], "violated": [ids]}
+- ids must be the ones shown as [P<id>/<scope>] in this conversation
+- applied: a principle that clearly guided the work; violated: one that was
+  clearly ignored or contradicted
+- omit the key entirely when nothing is clear; never invent ids
+
 Put the JSON in the assistant text, not only in thinking.`;
 
 export const DIRECT_REVIEW_SYSTEM_PROMPT = `You review coding conversations and extract durable memories worth saving across sessions.
