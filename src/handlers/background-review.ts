@@ -319,6 +319,11 @@ export function setupBackgroundReview(
             config,
             "automatic",
           );
+          if (!result.ok) {
+            // Silence here hid an ~80% failure rate for a long time; a failed
+            // distillation run must leave a visible trace in the session.
+            console.warn(`[pi-hermes-memory] Memory concretion failed: ${result.error ?? "no reason reported"}`);
+          }
           if (result.ok && (result.added > 0 || result.refined > 0 || result.reinforced > 0 || result.conflicts > 0)) {
             ctx.ui.notify(
               `🧠 Memory concretion: ${result.added} added, ${result.refined} refined, ${result.reinforced} reinforced, ${result.conflicts} conflict${result.conflicts === 1 ? "" : "s"}`,

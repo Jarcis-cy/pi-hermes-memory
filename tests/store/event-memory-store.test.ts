@@ -173,7 +173,7 @@ describe("event-memory-store", () => {
     assert.equal(getMemoryEvents(dbManager, { pendingOnly: true }).length, 0);
   });
 
-  it("rejects a non-empty plan that leaves an event unclassified", () => {
+  it("leaves an unclassified event pending instead of failing the whole plan", () => {
     const first = captureMemoryEvents(dbManager, [{
       scope: "global",
       kind: "failure",
@@ -188,19 +188,19 @@ describe("event-memory-store", () => {
     }], { source: "background-review", captureId: "partial-2" });
     const events = getMemoryEvents(dbManager, { pendingOnly: true });
     const runId = startConcretionRun(dbManager, "manual", events.length);
-    assert.throws(() => applyConcretionPlan(dbManager, runId, events, [{
+    const applied = applyConcretionPlan(dbManager, runId, events, [{
       action: "add",
       scope: "global",
       content: "After parent cancellation, verify child work has actually stopped.",
       sourceEventIds: first.eventIds,
       existingPrincipleIds: [],
-    }], { charLimit: 5000 }), /did not classify every event/);
+    }], { charLimit: 5000 });
 
-    assert.equal(getActivePrinciples(dbManager).length, 0);
-    assert.deepEqual(
-      getMemoryEvents(dbManager, { pendingOnly: true }).map((event) => event.id),
-      [...first.eventIds, ...second.eventIds],
-    );
+    // 已分类的那条被应用；未分类的那条留在 pending 等下一轮，整轮不算失败
+    assert.equal(applied.added, 1);
+    assert.equal(applied.unclassified, 1);
+    assert.equal(getActivePrinciples(dbManager).length, 1);
+    assert.deepEqual(getMemoryEvents(dbManager, { pendingOnly: true }).map((event) => event.id), second.eventIds);
   });
 
   it("accepts explicit none classification for events that warrant no principle", () => {
@@ -236,7 +236,7 @@ describe("event-memory-store", () => {
     assert.equal(getMemoryEvents(dbManager, { pendingOnly: true }).length, 0);
   });
 
-  it("rejects an unsupported candidate without consuming the pending event", () => {
+  it("skips an unsupported candidate without consuming the pending event", () => {
     captureMemoryEvents(dbManager, [{
       scope: "global",
       kind: "outcome",
@@ -245,15 +245,17 @@ describe("event-memory-store", () => {
     }], { source: "background-review", captureId: "review-1" });
     const events = getMemoryEvents(dbManager, { pendingOnly: true });
     const runId = startConcretionRun(dbManager, "manual", events.length);
-    assert.throws(() => applyConcretionPlan(dbManager, runId, events, [{
+    const applied = applyConcretionPlan(dbManager, runId, events, [{
       action: "add",
       scope: "global",
       content: "Invented rule without evidence.",
       rationale: "unsupported",
       sourceEventIds: [9999],
       existingPrincipleIds: [],
-    }], { charLimit: 5000 }), /out-of-batch source event/);
+    }], { charLimit: 5000 });
 
+    assert.equal(applied.skipped, 1);
+    assert.equal(applied.added, 0);
     assert.equal(getActivePrinciples(dbManager).length, 0);
     assert.equal(getMemoryEvents(dbManager, { pendingOnly: true }).length, 1);
   });
@@ -331,7 +333,7 @@ describe("event-memory-store", () => {
     assert.doesNotMatch(renderAdaptivePrinciples(dbManager, "project-b"), /Use pnpm/);
   });
 
-  it("rejects cross-project reinforcement and refinement of another project's principle", () => {
+  it("skips cross-project reinforcement and refinement of another project's principle", () => {
     const a = captureMemoryEvents(dbManager, [{
       scope: "project",
       kind: "convention",
@@ -357,7 +359,7 @@ describe("event-memory-store", () => {
     }], { source: "background-review", captureId: "project-b-rule", project: "project-b" });
     events = getMemoryEvents(dbManager, { pendingOnly: true });
     runId = startConcretionRun(dbManager, "manual", events.length);
-    assert.throws(() => applyConcretionPlan(dbManager, runId, events, [{
+    const applied = applyConcretionPlan(dbManager, runId, events, [{
       action: "reinforce",
       sourceEventIds: b.eventIds,
       existingPrincipleIds: [original.id],
@@ -367,13 +369,18 @@ describe("event-memory-store", () => {
       content: "Use npm in Project B.",
       sourceEventIds: b.eventIds,
       existingPrincipleIds: [original.id],
-    }], { charLimit: 5000 }), /project boundaries/);
+    }], { charLimit: 5000 });
 
+    assert.equal(applied.skipped + applied.conflicts, 2, "both candidates degrade instead of throwing");
+    assert.equal(applied.reinforced, 0);
     const projectA = getActivePrinciples(dbManager, "project-a");
     assert.equal(projectA.length, 1);
     assert.equal(projectA[0].id, original.id);
     assert.deepEqual(projectA[0].sourceEventIds, a.eventIds);
-    assert.deepEqual(getMemoryEvents(dbManager, { pendingOnly: true }).map((event) => event.id), b.eventIds);
+    // 该 refine 没有可替换的同域原则 → 记为冲突（冲突会消费它的事件，避免无限重试）；
+    // 跨项目的 reinforce 直接跳过，其事件保持 pending 供下一轮。
+    assert.equal(getActivePrinciples(dbManager, "project-b").length, 0, "no project-b principle was created");
+    assert.deepEqual(getMemoryEvents(dbManager, { pendingOnly: true }).map((event) => event.id), []);
   });
 
   it("drops unsafe principle candidates instead of injecting them through the conflict queue", () => {

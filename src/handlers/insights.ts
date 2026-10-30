@@ -105,6 +105,51 @@ function renderEventUsage(stats: EventUsageStats | null): string[] {
   return lines;
 }
 
+/** Concretion health: the distillation loop ran silently and mostly failed for a
+ * long time, so its success rate belongs in plain sight next to the store sizes. */
+interface ConcretionHealth {
+  total: number;
+  failed: number;
+  lastFailureAt: string | null;
+  lastFailure: string | null;
+  pendingEvents: number;
+}
+
+function concretionHealth(dbManager: DatabaseManager | null): ConcretionHealth | null {
+  if (!dbManager) return null;
+  try {
+    const db = dbManager.getDb();
+    const total = (db.prepare("SELECT COUNT(*) AS c FROM concretion_runs").get() as { c: number | bigint }).c;
+    const failed = (db.prepare("SELECT COUNT(*) AS c FROM concretion_runs WHERE status = 'failed'").get() as { c: number | bigint }).c;
+    const last = db.prepare(
+      "SELECT started_at, error FROM concretion_runs WHERE status = 'failed' ORDER BY id DESC LIMIT 1",
+    ).get() as { started_at: string; error: string | null } | undefined;
+    const pendingEvents = (db.prepare("SELECT COUNT(*) AS c FROM memory_events WHERE concreted_at IS NULL").get() as { c: number | bigint }).c;
+    const num = (value: number | bigint) => (typeof value === "bigint" ? Number(value) : value);
+    return {
+      total: num(total),
+      failed: num(failed),
+      lastFailureAt: last?.started_at ?? null,
+      lastFailure: last?.error ?? null,
+      pendingEvents: num(pendingEvents),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function renderConcretionHealth(stats: ConcretionHealth | null): string[] {
+  if (!stats || stats.total === 0) return [];
+  const rate = Math.round((stats.failed / Math.max(1, stats.total)) * 100);
+  const lines = [
+    `  🧪 CONCRETION — ${stats.total - stats.failed}/${stats.total} runs completed (${rate}% failed) · ${stats.pendingEvents} events pending distillation`,
+  ];
+  if (stats.failed > 0 && stats.lastFailure) {
+    lines.push(`  last failure (${(stats.lastFailureAt ?? "").slice(0, 10)}): ${usageExcerpt(stats.lastFailure)}`);
+  }
+  return lines;
+}
+
 export function registerInsightsCommand(
   pi: ExtensionAPI,
   store: MemoryStore,
@@ -187,6 +232,12 @@ export function registerInsightsCommand(
       ];
       if (usageLines.length > 0) {
         lines.push(...usageLines);
+        lines.push("");
+      }
+
+      const concretionLines = renderConcretionHealth(concretionHealth(dbManager));
+      if (concretionLines.length > 0) {
+        lines.push(...concretionLines);
         lines.push("");
       }
 

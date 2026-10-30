@@ -150,6 +150,10 @@ export interface ApplyConcretionResult {
   merged: number;
   conflicts: number;
   ignored: number;
+  /** Candidates dropped because the model's plan was not usable for them. */
+  skipped: number;
+  /** Batch events no candidate classified; they stay pending for the next run. */
+  unclassified: number;
   concretedEvents: number;
 }
 
@@ -945,6 +949,8 @@ export function applyConcretionPlan(
     merged: 0,
     conflicts: 0,
     ignored: 0,
+    skipped: 0,
+    unclassified: 0,
     concretedEvents: 0,
   };
 
@@ -953,9 +959,13 @@ export function applyConcretionPlan(
       for (const eventId of eventIds) consumedEventIds.add(eventId);
     }
     for (const candidate of candidates) {
-      const sourceEventIds = [...new Set(candidate.sourceEventIds)];
-      if (!sourceEventIds.length || sourceEventIds.some((id) => !eventIds.has(id))) {
-        throw new Error("Concretion candidate cited a missing or out-of-batch source event.");
+      // Model output is imperfect by nature. A candidate that cites nothing usable
+      // is dropped, not fatal: its events stay pending and the next run retries
+      // them. Failing the whole batch is how distillation silently stopped working.
+      const sourceEventIds = [...new Set(candidate.sourceEventIds)].filter((id) => eventIds.has(id));
+      if (!sourceEventIds.length) {
+        result.skipped++;
+        continue;
       }
       if (candidate.action === "none") {
         for (const eventId of sourceEventIds) consumedEventIds.add(eventId);
@@ -965,7 +975,8 @@ export function applyConcretionPlan(
       const existingIds = [...new Set(candidate.existingPrincipleIds ?? [])];
       if (candidate.action === "reinforce") {
         if (existingIds.length !== 1) {
-          throw new Error("Reinforcement must identify exactly one active principle.");
+          result.skipped++;
+          continue;
         }
         const principleId = existingIds[0];
         const active = db.prepare(`
@@ -974,16 +985,21 @@ export function applyConcretionPlan(
           WHERE id = ? AND status = 'active'
         `).get(principleId) as { id: number; scope: EventScope; project: string | null } | undefined;
         if (!active) {
-          throw new Error("Reinforcement referenced a principle that is not active.");
+          result.skipped++;
+          continue;
         }
-        if (active.scope === "project") {
-          const sourceProjects = [...new Set(sourceEventIds.map((id) => eventsById.get(id)?.project ?? null))];
-          if (sourceProjects.length !== 1 || sourceProjects[0] !== active.project) {
-            throw new Error("Reinforcement mixed source events across project boundaries.");
-          }
+        // A project-scoped principle may only be reinforced by evidence from that
+        // project. Cross-project sources are dropped rather than failing the run;
+        // if none survive, the candidate is skipped.
+        const usableSourceIds = active.scope === "project"
+          ? sourceEventIds.filter((id) => eventsById.get(id)?.project === active.project)
+          : sourceEventIds;
+        if (!usableSourceIds.length) {
+          result.skipped++;
+          continue;
         }
-        linkPrincipleSources(db, principleId, sourceEventIds);
-        for (const eventId of sourceEventIds) consumedEventIds.add(eventId);
+        linkPrincipleSources(db, principleId, usableSourceIds);
+        for (const eventId of usableSourceIds) consumedEventIds.add(eventId);
         result.reinforced++;
         continue;
       }
@@ -991,7 +1007,8 @@ export function applyConcretionPlan(
       const scope = candidate.scope;
       const content = candidate.content?.trim();
       if (!scope || !content || !EVENT_SCOPES.has(scope)) {
-        throw new Error("Concretion candidate has an invalid scope or empty content.");
+        result.skipped++;
+        continue;
       }
       const sourceProjects = [...new Set(sourceEventIds
         .map((id) => eventsById.get(id)?.project ?? null)
@@ -1131,10 +1148,11 @@ export function applyConcretionPlan(
       for (const eventId of sourceEventIds) consumedEventIds.add(eventId);
     }
 
-    if (candidates.length > 0 && consumedEventIds.size !== eventIds.size) {
-      const missing = [...eventIds].filter((id) => !consumedEventIds.has(id));
-      throw new Error(`Concretion plan did not classify every event in the batch: ${missing.join(", ")}`);
-    }
+    // Unclassified events are not an error: they simply stay pending and are
+    // offered again next run. The count is reported so the caller can see when the
+    // model is consistently under-classifying.
+    const missing = [...eventIds].filter((id) => !consumedEventIds.has(id));
+    result.unclassified = missing.length;
 
     const ids = [...consumedEventIds];
     if (ids.length) {
