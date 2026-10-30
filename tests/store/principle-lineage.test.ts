@@ -7,6 +7,7 @@ import { DatabaseManager } from "../../src/store/db.js";
 import {
   applyConcretionPlan,
   captureMemoryEvents,
+  countUnlinkedSuperseded,
   findOrphanedLineage,
   getActivePrinciples,
   getMemoryEvents,
@@ -125,5 +126,32 @@ describe("principle lineage safety", () => {
     assert.equal(orphans.length, 1);
     assert.equal(orphans[0]!.predecessorId, a.id);
     assert.deepEqual(orphans[0]!.retiredSuccessors, [successor.id]);
+  });
+  it("separates a broken chain from a legacy row with no recorded predecessor link", () => {
+    const a = addPrinciple("lin-7", "Verify the producer emits the field before wiring it.");
+    const extra = captureMemoryEvents(dbManager, [{ scope: "global", kind: "insight", content: "refine evidence 2" }], {
+      captureId: "lin-refine-2", source: "manual",
+    });
+    const run = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "refine", scope: "global", content: "Verify the producer emits the field and route before wiring it.",
+      rationale: "refined", sourceEventIds: extra.eventIds, existingPrincipleIds: [a.id],
+    }], { charLimit: 20000 });
+    const carrier = getActivePrinciples(dbManager).find((principle) => principle.supersedesId === a.id)!;
+
+    // 模拟历史缺口：一个 superseded 行，没有任何行声称承载它
+    const orphanRowId = dbManager.getDb().prepare(
+      "INSERT INTO principles (scope, project, content, status, created_at, updated_at) VALUES ('global', NULL, ?, 'superseded', ?, ?)",
+    ).run("Legacy row with no back-link.", new Date().toISOString(), new Date().toISOString()).lastInsertRowid;
+
+    assert.equal(countUnlinkedSuperseded(dbManager), 1, "the legacy row is counted as a provenance gap");
+    assert.equal(findOrphanedLineage(dbManager).length, 0, "and it is NOT reported as a broken chain");
+
+    // 真正断链：承载者被直接退役
+    dbManager.getDb().prepare("UPDATE principles SET status = 'rejected' WHERE id = ?").run(carrier.id);
+    const broken = findOrphanedLineage(dbManager);
+    assert.equal(broken.length, 1);
+    assert.equal(broken[0]!.predecessorId, a.id);
+    assert.ok(orphanRowId);
   });
 });

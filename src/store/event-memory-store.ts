@@ -812,40 +812,86 @@ function restoreOrphanedPredecessors(
 }
 
 /**
- * Read-only report of broken lineage: a principle that is still `superseded` but
- * whose every successor has itself been retired. That state silently removed six
- * real principles from injection in a live maintenance session.
+ * Read-only report of broken lineage: a principle that is still `superseded` with no
+ * ACTIVE row reachable from it through the supersede graph.
+ *
+ * Two subtleties, both learned from a live report of 24 phantom breakages:
+ * - reachability must be TRANSITIVE (A superseded by B, B later merged into C: C
+ *   names B, not A), so a healthy chain is not reported broken;
+ * - the candidate set is the ids MENTIONED in lineage, not the rows that carry
+ *   lineage: the victim of a broken chain is a plain superseded row with no lineage
+ *   of its own and would otherwise never be examined.
  */
 export function findOrphanedLineage(
   dbManager: DatabaseManager,
 ): Array<{ predecessorId: number; retiredSuccessors: number[] }> {
   const db = dbManager.getDb();
-  const rows = db.prepare(
-    "SELECT id, status, supersedes_id, superseded_ids FROM principles WHERE supersedes_id IS NOT NULL OR superseded_ids IS NOT NULL",
-  ).all() as Array<{ id: number; status: string; supersedes_id: number | null; superseded_ids: string | null }>;
-
-  const activeCarriers = new Set<number>();
-  for (const row of rows) {
-    if (row.status !== "active") continue;
-    for (const predecessorId of supersededIdsOf(row)) activeCarriers.add(predecessorId);
+  const statusById = new Map<number, string>();
+  for (const row of db.prepare("SELECT id, status FROM principles").all() as Array<{ id: number; status: string }>) {
+    statusById.set(row.id, row.status);
   }
-
-  const orphans = new Map<number, number[]>();
-  for (const row of rows) {
-    if (row.status === "active") continue;
+  const carriersOf = new Map<number, number[]>();
+  /** Carriers whose lineage was recorded in full (the `superseded_ids` era). Before
+   * that column existed a merge recorded only its first id, so a predecessor in a
+   * multi-id merge looks unlinked through no fault of anyone's — those rows cannot
+   * break a chain retroactively and must not be reported as if they had. */
+  const fullyRecorded = new Set<number>();
+  for (const row of db.prepare(
+    "SELECT id, supersedes_id, superseded_ids FROM principles WHERE supersedes_id IS NOT NULL OR superseded_ids IS NOT NULL",
+  ).all() as Array<{ id: number; supersedes_id: number | null; superseded_ids: string | null }>) {
+    if (typeof row.superseded_ids === "string" && row.superseded_ids.trim().startsWith("[")) {
+      fullyRecorded.add(row.id);
+    }
     for (const predecessorId of supersededIdsOf(row)) {
-      if (activeCarriers.has(predecessorId)) continue;
-      const list = orphans.get(predecessorId) ?? [];
+      const list = carriersOf.get(predecessorId) ?? [];
       list.push(row.id);
-      orphans.set(predecessorId, list);
+      carriersOf.set(predecessorId, list);
     }
   }
-  return [...orphans.entries()]
-    .filter(([predecessorId]) => {
-      const state = db.prepare("SELECT status FROM principles WHERE id = ?").get(predecessorId) as { status: string } | undefined;
-      return state?.status === "superseded";
-    })
-    .map(([predecessorId, retiredSuccessors]) => ({ predecessorId, retiredSuccessors }));
+
+  /** Walk up the supersede graph looking for any row that is still active. */
+  const reachesActive = (startId: number): boolean => {
+    const seen = new Set<number>();
+    const stack = [...(carriersOf.get(startId) ?? [])];
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (statusById.get(id) === "active") return true;
+      for (const next of carriersOf.get(id) ?? []) stack.push(next);
+    }
+    return false;
+  };
+
+  const orphans: Array<{ predecessorId: number; retiredSuccessors: number[] }> = [];
+  for (const [predecessorId, carriers] of carriersOf) {
+    // No carrier rows at all means the id was never linked (covered by
+    // countUnlinkedSuperseded), not that a chain broke.
+    if (carriers.length === 0) continue;
+    if (statusById.get(predecessorId) !== "superseded") continue;
+    if (reachesActive(predecessorId)) continue;
+    // Only report chains whose carrier recorded full lineage; otherwise it is the
+    // pre-column merge gap (content still lives in an active successor).
+    if (!carriers.some((id) => fullyRecorded.has(id))) continue;
+    orphans.push({ predecessorId, retiredSuccessors: carriers });
+  }
+  return orphans.sort((a, b) => a.predecessorId - b.predecessorId);
+}
+
+/** Superseded rows nobody claims: historical merges recorded before full lineage
+ * existed. Content survives in a successor; only the back-link is missing. */
+export function countUnlinkedSuperseded(dbManager: DatabaseManager): number {
+  const db = dbManager.getDb();
+  const rows = db.prepare(
+    "SELECT id, supersedes_id, superseded_ids FROM principles WHERE status = 'superseded'",
+  ).all() as Array<{ id: number; supersedes_id: number | null; superseded_ids: string | null }>;
+  const claimed = new Set<number>();
+  for (const row of db.prepare(
+    "SELECT supersedes_id, superseded_ids FROM principles WHERE supersedes_id IS NOT NULL OR superseded_ids IS NOT NULL",
+  ).all() as Array<{ supersedes_id: number | null; superseded_ids: string | null }>) {
+    for (const predecessorId of supersededIdsOf(row)) claimed.add(predecessorId);
+  }
+  return rows.filter((row) => !claimed.has(row.id)).length;
 }
 
 /** Record one cold recall per principle (batched). Failures never break search. */
