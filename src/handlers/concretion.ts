@@ -96,6 +96,10 @@ export interface ConcretionResult {
   merged: number;
   conflicts: number;
   ignored: number;
+  /** Candidates the model produced that could not be applied (dropped, not fatal). */
+  skipped: number;
+  /** Batch events left pending because no candidate classified them. */
+  unclassified: number;
   error?: string;
 }
 
@@ -199,7 +203,7 @@ export function buildConcretionUserPrompt(
 }
 
 function emptyResult(overrides: Partial<ConcretionResult> = {}): ConcretionResult {
-  return { ok: true, eventCount: 0, added: 0, reinforced: 0, refined: 0, merged: 0, conflicts: 0, ignored: 0, ...overrides };
+  return { ok: true, eventCount: 0, added: 0, reinforced: 0, refined: 0, merged: 0, conflicts: 0, ignored: 0, skipped: 0, unclassified: 0, ...overrides };
 }
 
 export async function runConcretion(
@@ -296,6 +300,8 @@ export async function runConcretion(
       merged: applied.merged,
       conflicts: applied.conflicts,
       ignored: applied.ignored,
+      skipped: applied.skipped,
+      unclassified: applied.unclassified,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

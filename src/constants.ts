@@ -33,7 +33,9 @@ export const DEFAULT_NUDGE_TOOL_CALLS = 15;
 export const DEFAULT_REVIEW_RECENT_MESSAGES = 0;
 export const DEFAULT_FLUSH_RECENT_MESSAGES = 0;
 export const DEFAULT_CONCRETION_REVIEW_THRESHOLD = 10;
-export const DEFAULT_CONCRETION_EVENT_BATCH_SIZE = 100;
+/** Events per concretion prompt. Large batches (100) routinely exceeded the
+ * subprocess timeout and made the model under-classify; 40 keeps both healthy. */
+export const DEFAULT_CONCRETION_EVENT_BATCH_SIZE = 40;
 export const DEFAULT_PRINCIPLE_CHAR_LIMIT = 20000;
 /**
  * A consolidation run pays child-process boot plus a full LLM turn, which

@@ -249,6 +249,28 @@ hole:
 Nothing is deleted by either path: the concrete event record stays the ground
 truth, principles are the abstraction over it.
 
+## Distillation Resilience
+
+Concretion (event → principle) runs against imperfect model output, so its failure
+policy is degrade-never-throw:
+
+| Model imperfection | Behavior |
+|---|---|
+| candidate cites an id outside the batch | foreign ids dropped; candidate skipped if none remain |
+| reinforce without exactly one target, or an inactive target | candidate skipped |
+| cross-project evidence for a project-scoped principle | non-matching sources dropped; skipped if none remain |
+| candidate leaves batch events unclassified | those events stay pending for the next run (`unclassified` count) |
+| invalid scope / empty content | candidate skipped |
+
+A run therefore completes with `added / reinforced / refined / merged / conflicts /
+skipped / unclassified` counters instead of failing wholesale, and skipped work is
+retried next batch rather than lost. `concretionEventBatchSize` defaults to 40
+(large batches timed out the subprocess and made the model under-classify).
+
+Failures are no longer silent: a failed automatic run logs a warning in the
+session, and `/memory-insights` reports the loop's health line — runs completed vs
+failed, the last failure reason, and how many events are pending distillation.
+
 ## Principle Strength (Prehension Accounting)
 
 A principle is not permanently important because it exists. Three signals keep the
