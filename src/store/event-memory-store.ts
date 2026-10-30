@@ -1481,8 +1481,24 @@ export function renderAdaptivePrinciples(
       if (used - contrastStart >= contrastReserve && used - contrastStart > 0) break;
       if (!admit(principle, " ·violated")) break;
     }
-    for (const principle of competing) {
-      if (!admit(principle, "")) break;
+    // Competing slice, interleaved by scope class: strength alone lets the newest
+    // project principles crowd out older cross-task defaults, which is exactly
+    // backwards for a layer that exists to carry defaults. Alternate project and
+    // global/user picks so a tight budget still yields a mixed working set.
+    const projectQueue = competing.filter((principle) => principle.scope === "project");
+    const sharedQueue = competing.filter((principle) => principle.scope !== "project");
+    while (projectQueue.length > 0 || sharedQueue.length > 0) {
+      let admitted = false;
+      for (const queue of [projectQueue, sharedQueue]) {
+        if (queue.length === 0) continue;
+        if (admit(queue[0]!, "")) {
+          queue.shift();
+          admitted = true;
+        } else {
+          queue.length = 0; // no room for another line of this size class
+        }
+      }
+      if (!admitted) break;
     }
 
     const omitted = principles.length - shown.size;

@@ -1095,4 +1095,34 @@ describe("event-memory-store", () => {
     assert.equal(getActivePrinciples(dbManager).length, 2);
     assert.equal(getPendingPrincipleConflicts(dbManager, 5).length, 0);
   });
+  it("keeps a mixed working set when the budget is tight", () => {
+    const make = (cid: string, scope: "project" | "global", content: string, project?: string) => {
+      const capture = captureMemoryEvents(dbManager, [{ scope, kind: "insight", content: `${cid} evidence` }], {
+        captureId: cid, source: "manual", project,
+      });
+      const run = startConcretionRun(dbManager, "manual", 1);
+      applyConcretionPlan(dbManager, run, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+        action: "add", scope, project, content, rationale: cid, sourceEventIds: capture.eventIds, existingPrincipleIds: [],
+      }], { charLimit: 20000 });
+      return getActivePrinciples(dbManager, project ?? null).find((p) => p.content === content)!;
+    };
+    const p1 = make("mix-1", "project", "Project alpha rule one about wiring adapters safely.", "alpha");
+    const p2 = make("mix-2", "project", "Project alpha rule two about verifying adapter output.", "alpha");
+    const g1 = make("mix-3", "global", "Global rule one about verifying producer output first.");
+    const g2 = make("mix-4", "global", "Global rule two about reading a record back after mutation.");
+
+    // 预算只够约 3 行：若按纯强度排序，项目域会挤掉共享域
+    const generous = renderAdaptivePrinciples(dbManager, "alpha", false, 20000);
+    const lineOf = (id: number) => generous.split("\n").find((line) => line.includes(`[P${id}/`))!;
+    const headerChars = generous.slice(0, generous.indexOf("1. [P")).length + "</adaptive-principles>".length + 1;
+    const noteChars = renderAdaptivePrinciples(dbManager, "alpha", false, 1).split("\n").find((l) => l.includes("are not shown"))!.length + 2;
+    const budget = headerChars + noteChars + lineOf(p1.id).length + lineOf(p2.id).length + lineOf(g1.id).length + 8;
+
+    const rendered = renderAdaptivePrinciples(dbManager, "alpha", false, budget);
+    assert.match(rendered, new RegExp(`\\[P${p1.id}/project\\]`), "project rules are admitted");
+    assert.match(rendered, /\[P\d+\/global\]/, "shared rules are not crowded out by scope");
+    assert.match(rendered, /\[P\d+\/project\]/, "and project rules are not crowded out either");
+    assert.ok(rendered.length <= budget);
+    assert.equal(getActivePrinciples(dbManager, "alpha").length, 4, "nothing is deleted by selection");
+  });
 });
