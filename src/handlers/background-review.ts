@@ -326,7 +326,7 @@ export function setupBackgroundReview(
           }
           if (result.ok && (result.added > 0 || result.refined > 0 || result.reinforced > 0 || result.conflicts > 0)) {
             ctx.ui.notify(
-              `🧠 Memory concretion: ${result.added} added, ${result.refined} refined, ${result.reinforced} reinforced, ${result.conflicts} conflict${result.conflicts === 1 ? "" : "s"}`,
+              `🧠 Memory concretion: ${result.added} added, ${result.refined} refined, ${result.reinforced} reinforced, ${result.merged} merged, ${result.conflicts} conflict${result.conflicts === 1 ? "" : "s"}, ${result.ignored} no-action, ${result.skipped} skipped`,
               result.conflicts > 0 ? "warning" : "info",
             );
           }
