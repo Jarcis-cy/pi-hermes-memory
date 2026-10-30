@@ -272,6 +272,27 @@ Review verdicts are optional in the review payload
 `[P<id>/<scope>]`), validated, capped at 20 ids per verdict, and applied
 best-effort so they can never fail a review.
 
+## Three Injection Registers
+
+Selection is not one problem, so the budget is split into three registers
+(deterministic for a given database state and clock):
+
+| Register | Contents | Rule |
+|---|---|---|
+| **A — causal efficacy** | pinned principles (safety, credentials, authorization boundaries) | injected every run regardless of relevance; marked `·pinned` |
+| **C — contrast** | active principles violated within the last 30 days | guaranteed ~10% slice, so an ignored default resurfaces instead of being buried; marked `·violated` |
+| **B — competition** | everything else | ranked by strength (recall, follow, violation recency) with scope as tiebreaker |
+
+A prohibition that only appears when it already looks relevant is the one that
+fails, hence A; a set that only surfaces what matches becomes an echo chamber,
+hence C. Anything that falls out of B is not deleted — it stays recallable
+through `memory_search`, and near-duplicates are absorbed at write time by the
+encoding gate.
+
+Pinning is user-only: `/memory-principle-pin` lists, pins (`<id>`) and unpins
+(`remove <id>`). Review, concretion and consolidation have no path to set it, so
+the model cannot promote its own output into the always-injected register.
+
 ## Standing Instructions
 
 Recall is probabilistic. In `policy-only` mode a stored rule only takes effect if the agent decides to call `memory_search` **before** the action the rule would have prevented — and for a prohibition, that is exactly the moment it has no reason to look. Preferences survive a missed lookup; prohibitions do not.
