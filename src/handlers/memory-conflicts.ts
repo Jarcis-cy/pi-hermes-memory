@@ -62,6 +62,7 @@ export function registerMemoryConflictsCommand(
   dbManager: DatabaseManager,
   globalDir: string,
   principleCharLimit: number,
+  principleStoreCharLimit: number,
 ): void {
   pi.registerCommand("memory-conflicts", {
     description: "List or resolve conflicts between adaptive memory principles",
@@ -97,7 +98,7 @@ export function registerMemoryConflictsCommand(
         dbManager,
         conflictId,
         decision,
-        principleCharLimit,
+        principleStoreCharLimit,
         match[4],
         { allowRestatement: (match[3] ?? "").toLowerCase() === "distinct" },
       );

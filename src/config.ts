@@ -16,6 +16,7 @@ import {
   DEFAULT_CONCRETION_REVIEW_THRESHOLD,
   DEFAULT_CONCRETION_EVENT_BATCH_SIZE,
   DEFAULT_PRINCIPLE_CHAR_LIMIT,
+  DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT,
   DEFAULT_CONSOLIDATION_TIMEOUT_MS,
   DEFAULT_FLUSH_COMPACT_TIMEOUT_MS,
   CONSOLIDATION_CHUNK_CHARS_MIN,
@@ -83,6 +84,7 @@ const DEFAULT_CONFIG: MemoryConfig = {
   concretionReviewThreshold: DEFAULT_CONCRETION_REVIEW_THRESHOLD,
   concretionEventBatchSize: DEFAULT_CONCRETION_EVENT_BATCH_SIZE,
   principleCharLimit: DEFAULT_PRINCIPLE_CHAR_LIMIT,
+  principleStoreCharLimit: DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT,
   principleInjectionEnabled: true,
   projectsMemoryDir: DEFAULT_PROJECTS_MEMORY_DIR,
   sessionSearch: { variant: "legacy" },
@@ -198,6 +200,7 @@ export function loadConfig(configPath = DEFAULT_CONFIG_PATH): MemoryConfig {
       if (isPositiveInteger(parsed.concretionReviewThreshold)) config.concretionReviewThreshold = parsed.concretionReviewThreshold;
       if (isPositiveInteger(parsed.concretionEventBatchSize)) config.concretionEventBatchSize = parsed.concretionEventBatchSize;
       if (isPositiveInteger(parsed.principleCharLimit)) config.principleCharLimit = parsed.principleCharLimit;
+      if (isPositiveInteger(parsed.principleStoreCharLimit)) config.principleStoreCharLimit = parsed.principleStoreCharLimit;
       if (typeof parsed.principleInjectionEnabled === "boolean") config.principleInjectionEnabled = parsed.principleInjectionEnabled;
       if (typeof parsed.projectCharLimit === "number") config.projectCharLimit = parsed.projectCharLimit;
       if (typeof parsed.memoryDir === "string") {

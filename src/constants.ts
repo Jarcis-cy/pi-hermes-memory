@@ -41,6 +41,14 @@ export const DEFAULT_PRINCIPLE_CHAR_LIMIT = 20000;
  * this holds roughly a hundred of them (~2k tokens) — cheap next to the model's
  * context, and it turns "not injected" into "visible by id" instead of invisible. */
 export const PRINCIPLE_INDEX_MAX_CHARS = 8000;
+/**
+ * How much the principle LAYER may hold — separate from how much is injected per
+ * run. Injection is an attention budget (small on purpose); storage is a curation
+ * budget. Sharing one number deadlocked the layer: a store larger than the
+ * injection budget rejected every new addition as "over capacity", even though
+ * omission + index + cold recall make the gap the normal case.
+ */
+export const DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT = 48000;
 /** Summary width in the index. Wide enough to recognise a rule, narrow enough to
  * keep one line per principle. */
 export const PRINCIPLE_INDEX_SUMMARY_CHARS = 64;

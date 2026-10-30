@@ -260,6 +260,18 @@ about 70 characters each, capped at 8,000 chars ≈ 2k tokens). The model can th
 pull any of them by id with `memory_search` instead of needing to guess that a rule
 exists. Index cost is roughly 19% of injecting the same principles as full text.
 
+Two budgets, deliberately different numbers:
+
+| Setting | Default | Bounds |
+|---|---|---|
+| `principleCharLimit` | 20000 | characters **injected per run** (the working set / attention budget) |
+| `principleStoreCharLimit` | 48000 | characters the layer may **hold** (the curation budget) |
+
+Sharing one number is what deadlocked the layer in practice: a store larger than the
+injection budget (normal once omission exists) made every new addition fail as "over
+capacity". Storage stays bounded, injection stays small, and the gap is served by the
+index and by recall.
+
 Why the full-text budget stays modest even on very large contexts: at 16,000 chars
 the injected set is ≈4.7k tokens — 0.5% of a 1M window — so capacity is not the
 constraint. What a bigger budget buys is more simultaneous rules, and more rules
