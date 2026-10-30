@@ -41,6 +41,7 @@ import { setupBackgroundReview } from "./handlers/background-review.js";
 import { registerMemoryConflictsCommand } from "./handlers/memory-conflicts.js";
 import { registerConcretionCommand } from "./handlers/concretion.js";
 import { registerPrinciplePinCommand } from "./handlers/principle-pin.js";
+import { registerPrincipleRetireCommand } from "./handlers/principle-retire.js";
 import { setupSessionFlush } from "./handlers/session-flush.js";
 import { registerInsightsCommand } from "./handlers/insights.js";
 import { triggerConsolidation, registerConsolidateCommand } from "./handlers/auto-consolidate.js";
@@ -415,6 +416,7 @@ export default function (pi: ExtensionAPI) {
   registerConcretionCommand(memoryPi, dbManager, globalDir, config);
   registerMemoryConflictsCommand(memoryPi, dbManager, globalDir, config.principleCharLimit ?? DEFAULT_PRINCIPLE_CHAR_LIMIT);
   registerPrinciplePinCommand(memoryPi, dbManager, projectNameRef);
+  registerPrincipleRetireCommand(memoryPi, dbManager, projectNameRef);
   registerSkillsCommand(pi, skillStore);
   registerInterviewCommand(memoryPi, store);
   registerSwitchProjectCommand(pi, config);

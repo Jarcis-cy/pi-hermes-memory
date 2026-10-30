@@ -6,6 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { MemoryStore } from "../store/memory-store.js";
 import { DatabaseManager } from "../store/db.js";
 import { getMemoryUsageSignals, type MemoryUsageSignal } from "../store/sqlite-memory-store.js";
+import { findOrphanedLineage } from "../store/event-memory-store.js";
 import { resolveProjectName, resolveProjectStore, type ProjectNameRef, type ProjectStoreRef } from "../project-context.js";
 
 /** Entries shown in the usage section's top-recalled list. */
@@ -232,6 +233,13 @@ export function registerInsightsCommand(
       ];
       if (usageLines.length > 0) {
         lines.push(...usageLines);
+        lines.push("");
+      }
+
+      const orphans = dbManager ? findOrphanedLineage(dbManager) : [];
+      if (orphans.length > 0) {
+        lines.push(`  ⚠️  LINEAGE — ${orphans.length} superseded principle(s) whose only carrier was retired: ${orphans.slice(0, 5).map((o) => `P${o.predecessorId}`).join(", ")}${orphans.length > 5 ? ", ..." : ""}`);
+        lines.push("  Restore them with /memory-principle-retire (its report) or by re-activating the predecessor rows.");
         lines.push("");
       }
 

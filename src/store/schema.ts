@@ -191,6 +191,10 @@ export const SCHEMA_SQL = `
     rationale TEXT,
     status TEXT NOT NULL CHECK (status IN ('active', 'superseded', 'rejected')),
     supersedes_id INTEGER REFERENCES principles(id),
+    -- Every id this row replaced, as a JSON array. supersedes_id keeps the first
+    -- for compatibility; this column is what makes a merge group auditable and
+    -- lets retirement restore predecessors instead of orphaning them.
+    superseded_ids TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     -- Prehension accounting: how often this principle was actually felt — cold
