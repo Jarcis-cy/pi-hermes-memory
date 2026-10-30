@@ -951,7 +951,8 @@ export function applyConcretionPlan(
           rationale,
           conflictingPrincipleIds: relevantExistingIds,
           sourceEventIds,
-          reason: `Activating this candidate would exceed the ${options.charLimit}-character principle budget.`,
+          reason: `Activating this candidate would exceed the ${options.charLimit}-character principle budget;`
+            + " merge near-duplicate principles with /memory-concretize to make room.",
         });
         result.conflicts++;
       } else if (added.duplicateId) {
@@ -1101,7 +1102,13 @@ export function resolvePrincipleConflict(
   const transaction = db.transaction?.(apply);
   if (transaction) transaction();
   else apply();
-  if (outcome.overCapacity) return { success: false, message: `Decision would exceed the ${charLimit}-character principle budget.` };
+  if (outcome.overCapacity) {
+    return {
+      success: false,
+      message: `Activating this decision would exceed the ${charLimit}-character principle budget.`
+        + " Run /memory-concretize first: it can merge near-duplicate active principles and free enough budget for this candidate.",
+    };
+  }
   if (outcome.error) return { success: false, message: outcome.error };
   const principleId = outcome.principleId ?? outcome.duplicateId;
   return { success: true, message: `Resolved conflict ${conflictId}.`, principleId };
@@ -1140,7 +1147,11 @@ export function renderAdaptivePrinciples(
       "",
     ];
     const footer: string[] = [];
-    const budget = Math.max(0, charLimit - header.join("\n").length - "</adaptive-principles>".length);
+    // Reserve worst-case space for the omission note so the whole block stays
+    // within charLimit instead of overshooting by the note's length.
+    const omissionReserve = (`(${ordered.length} of ${ordered.length} active principles are not shown: the ${charLimit}-character principle budget is full.`
+      + " Run /memory-concretize to merge near-duplicate principles, or /memory-conflicts to review pending candidates.)").length;
+    const budget = Math.max(0, charLimit - header.join("\n").length - "</adaptive-principles>".length - omissionReserve);
     const lines: string[] = [];
     let used = 0;
     let omitted = 0;
@@ -1243,7 +1254,9 @@ export async function renderAdaptivePrinciplesFromSnapshot(
       "",
     ];
     const footer: string[] = [];
-    const budget = Math.max(0, limit - header.join("\n").length - "</adaptive-principles>".length);
+    const omissionReserve = (`(${scoped.length} of ${scoped.length} active principles are not shown: the ${limit}-character principle budget is full.`
+      + " Run /memory-concretize to merge near-duplicate principles, or /memory-conflicts to review pending candidates.)").length;
+    const budget = Math.max(0, limit - header.join("\n").length - "</adaptive-principles>".length - omissionReserve);
     const lines: string[] = [];
     let used = 0;
     let omitted = 0;
