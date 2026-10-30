@@ -25,7 +25,7 @@ import {
   usesDirectTransport,
 } from "./review-memory-ops.js";
 
-const CANDIDATE_ACTIONS = new Set<ConcretionCandidateAction>(["add", "reinforce", "refine", "conflict", "none"]);
+const CANDIDATE_ACTIONS = new Set<ConcretionCandidateAction>(["add", "reinforce", "refine", "merge", "conflict", "none"]);
 const SCOPES = new Set<EventScope>(["global", "user", "project"]);
 const LOCK_STALE_MS = 180_000;
 
@@ -46,6 +46,10 @@ Compare every candidate with the active principles:
 - add: genuinely new and compatible principle;
 - reinforce: same principle, new supporting evidence; do not rewrite it;
 - refine: compatible improvement of exactly one existing principle; supply its id;
+- merge: several near-duplicate or over-specific existing principles become ONE shorter
+  principle; supply every superseded id in existing_principle_ids (at least two) and put the
+  merged wording in content. A merge is the ONLY way to shrink a store that is over budget,
+  so prefer it whenever the budget note below says the set is full or nearly full;
 - conflict: incompatible, ambiguous, or tradeoff-bearing candidate; never decide silently;
 - none: no principle should be formed from those events.
 
@@ -54,6 +58,15 @@ Every supplied event MUST appear in at least one candidate's source_event_ids. G
 Respond with JSON only:
 {
   "candidates": [
+    {
+      "action": "merge",
+      "scope": "global",
+      "content": "Merged, shorter wording of the two principles",
+      "rationale": "Both principles describe the same rule at different levels of detail",
+      "source_event_ids": [1],
+      "existing_principle_ids": [4, 9],
+      "conflict_reason": ""
+    },
     {
       "action": "add",
       "scope": "global",
@@ -80,6 +93,7 @@ export interface ConcretionResult {
   added: number;
   reinforced: number;
   refined: number;
+  merged: number;
   conflicts: number;
   ignored: number;
   error?: string;
@@ -124,6 +138,7 @@ export function buildConcretionUserPrompt(
   events: ReturnType<typeof getMemoryEvents>,
   principles: ReturnType<typeof getAllActivePrinciples>,
   usageSignals: ReturnType<typeof getPrincipleUsageSignals> | null = null,
+  budgetUsage: { used: number; limit: number } | null = null,
 ): string {
   const eventLines = events.map((event) => JSON.stringify({
     id: event.id,
@@ -142,6 +157,16 @@ export function buildConcretionUserPrompt(
     rationale: principle.rationale,
     source_event_ids: principle.sourceEventIds,
   }));
+  const budgetLines: string[] = [];
+  if (budgetUsage) {
+    const pct = budgetUsage.limit > 0 ? Math.floor((budgetUsage.used / budgetUsage.limit) * 100) : 0;
+    budgetLines.push(
+      `Active principles use ${budgetUsage.used} of ${budgetUsage.limit} characters (${pct}%).`,
+      budgetUsage.used >= budgetUsage.limit
+        ? "The set is OVER budget: additions and refinements will be recorded as conflicts instead of activating. Use merge to combine near-duplicate principles and bring the store back under budget."
+        : "Prefer merge over add when two existing principles already say substantially the same thing.",
+    );
+  }
   const signalLines: string[] = [];
   if (usageSignals && usageSignals.size > 0) {
     for (const principle of principles) {
@@ -159,6 +184,7 @@ export function buildConcretionUserPrompt(
     "",
     "--- Active Principles (JSONL) ---",
     ...(principleLines.length ? principleLines : ["(none)"]),
+    ...(budgetLines.length ? ["", "--- Principle Budget ---", ...budgetLines] : []),
     ...(signalLines.length
       ? [
         "",
@@ -173,7 +199,7 @@ export function buildConcretionUserPrompt(
 }
 
 function emptyResult(overrides: Partial<ConcretionResult> = {}): ConcretionResult {
-  return { ok: true, eventCount: 0, added: 0, reinforced: 0, refined: 0, conflicts: 0, ignored: 0, ...overrides };
+  return { ok: true, eventCount: 0, added: 0, reinforced: 0, refined: 0, merged: 0, conflicts: 0, ignored: 0, ...overrides };
 }
 
 export async function runConcretion(
@@ -204,10 +230,15 @@ export async function runConcretion(
     const completePrinciples = getAllActivePrinciples(dbManager);
 
     runId = startConcretionRun(dbManager, trigger, lockedEvents.length);
+    const principleCharLimit = config.principleCharLimit ?? DEFAULT_PRINCIPLE_CHAR_LIMIT;
     const userPrompt = buildConcretionUserPrompt(
       lockedEvents,
       completePrinciples,
       getPrincipleUsageSignals(dbManager),
+      {
+        used: completePrinciples.reduce((sum, principle) => sum + principle.content.length, 0),
+        limit: principleCharLimit,
+      },
     );
     const runDirect = deps.runDirectJsonCompletion ?? runDirectJsonCompletion;
     const runChild = deps.execChildPrompt ?? execChildPrompt;
@@ -242,13 +273,14 @@ export async function runConcretion(
     const applied = applyConcretionPlan(dbManager, runId, lockedEvents, candidates, {
       charLimit: config.principleCharLimit ?? DEFAULT_PRINCIPLE_CHAR_LIMIT,
     });
-    await writePrinciplesSnapshot(dbManager, path.join(globalDir, PRINCIPLES_FILE));
+    await writePrinciplesSnapshot(dbManager, path.join(globalDir, PRINCIPLES_FILE), principleCharLimit);
     return {
       ok: true,
       eventCount: lockedEvents.length,
       added: applied.added,
       reinforced: applied.reinforced,
       refined: applied.refined,
+      merged: applied.merged,
       conflicts: applied.conflicts,
       ignored: applied.ignored,
     };

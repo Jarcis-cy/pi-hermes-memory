@@ -33,7 +33,7 @@ export function resolveMemoryPolicyPrompt(config: MemoryPolicyConfig): string {
  * operative directive rather than as recalled context.
  */
 export async function buildPromptContext(
-  config: Pick<MemoryConfig, "memoryMode" | "memoryPolicyStyle" | "memoryPolicyCustomText">,
+  config: Pick<MemoryConfig, "memoryMode" | "memoryPolicyStyle" | "memoryPolicyCustomText"> & { principleCharLimit?: number },
   store: MemoryStore,
   projectStore: MemoryStore | null,
   projectName: string,
@@ -48,7 +48,7 @@ export async function buildPromptContext(
   if (principleInjectionEnabled && !forChild) {
     if (dbManager) {
       try {
-        principleBlock = renderAdaptivePrinciples(dbManager, projectName || null);
+        principleBlock = renderAdaptivePrinciples(dbManager, projectName || null, true, config.principleCharLimit);
       } catch {
         // Persistent-memory availability must not block an otherwise healthy agent run.
       }

@@ -227,7 +227,7 @@ export default function (pi: ExtensionAPI) {
         // Fork layer: legacy markdown entries become append-only events, and
         // the principles snapshot is refreshed so PRINCIPLES.md tracks the DB.
         importLegacyMemoriesAsEvents(dbManager);
-        await writePrinciplesSnapshot(dbManager, path.join(globalDir, PRINCIPLES_FILE));
+        await writePrinciplesSnapshot(dbManager, path.join(globalDir, PRINCIPLES_FILE), config.principleCharLimit);
         persistenceInitialized = true;
       } catch (error) {
         if (lazy) throw error;

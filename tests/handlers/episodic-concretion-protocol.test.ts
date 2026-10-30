@@ -152,3 +152,19 @@ describe("concretion usage signals", () => {
     assert.doesNotMatch(prompt, /Principle Usage Signals/);
   });
 });
+
+describe("concretion budget guidance", () => {
+  it("states the budget and points at merge when the set is over budget", () => {
+    const prompt = buildConcretionUserPrompt([], [], null, { used: 32651, limit: 20000 });
+    assert.match(prompt, /Active principles use 32651 of 20000 characters \(163%\)/);
+    assert.match(prompt, /OVER budget/);
+    assert.match(prompt, /Use merge to combine near-duplicate principles/);
+  });
+
+  it("keeps the budget note advisory when there is headroom", () => {
+    const prompt = buildConcretionUserPrompt([], [], null, { used: 900, limit: 20000 });
+    assert.match(prompt, /900 of 20000 characters \(4%\)/);
+    assert.match(prompt, /Prefer merge over add/);
+    assert.doesNotMatch(prompt, /OVER budget/);
+  });
+});

@@ -619,4 +619,150 @@ describe("event-memory-store", () => {
       fs.rmSync(legacyDir, { recursive: true, force: true });
     }
   });
+  it("renders principles within the char budget and states the omission", () => {
+    const longContent = "Verify the consumer's expected field path before wiring a new adapter boundary.";
+    const captureA = captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "failure",
+      content: "Project-scoped adapter wiring failed twice.",
+    }], { captureId: "budget-a", project: "demo", source: "manual" });
+    const runA = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, runA, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "project",
+      content: longContent,
+      rationale: "Repeated wiring failure.",
+      sourceEventIds: captureA.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000, project: "demo" });
+
+    const captureB = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "insight",
+      content: "Global adapter lesson.",
+    }], { captureId: "budget-b", source: "manual" });
+    const runB = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, runB, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: longContent,
+      rationale: "Same lesson, global scope.",
+      sourceEventIds: captureB.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+
+    // Derive a budget that fits exactly one principle line plus the block header,
+    // so the test does not hardcode header length.
+    const generous = renderAdaptivePrinciples(dbManager, "demo", false, 20000);
+    const firstLine = generous.split("\n").find((line) => line.startsWith("1. ["))!;
+    const headerChars = generous.slice(0, generous.indexOf(firstLine)).length + "</adaptive-principles>".length + 1;
+    const oneLineBudget = headerChars + firstLine.length + 5;
+    const rendered = renderAdaptivePrinciples(dbManager, "demo", false, oneLineBudget);
+    assert.match(rendered, /\[P\d+\/project\]/, "project-scoped principle must be shown first");
+    assert.match(rendered, /1 of 2 active principles are not shown/, "omission count must be stated");
+    assert.match(rendered, /\/memory-concretize/);
+    assert.doesNotMatch(rendered, /\[P\d+\/global\]/);
+
+    // A generous budget shows everything with no omission note.
+    const full = renderAdaptivePrinciples(dbManager, "demo", false, 20000);
+    assert.match(full, /\[P\d+\/project\]/);
+    assert.match(full, /\[P\d+\/global\]/);
+    assert.doesNotMatch(full, /are not shown/);
+  });
+
+  it("merges several principles into one and shrinks the store", async () => {
+    const first = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "failure",
+      content: "Adapter wiring failed on the consumer side.",
+    }], { captureId: "merge-1", source: "manual" });
+    const run1 = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run1, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Verify the consumer's expected field path before wiring.",
+      rationale: "Consumer mismatch.",
+      sourceEventIds: first.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+
+    const second = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "failure",
+      content: "Adapter wiring failed on the producer side.",
+    }], { captureId: "merge-2", source: "manual" });
+    const run2 = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run2, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Check both sides of an adapter contract before wiring it.",
+      rationale: "Producer mismatch.",
+      sourceEventIds: second.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+
+    const before = getActivePrinciples(dbManager);
+    assert.equal(before.length, 2);
+    const charsBefore = before.reduce((sum, principle) => sum + principle.content.length, 0);
+
+    const third = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "insight",
+      content: "Both adapter failures had the same root: an unverified contract.",
+    }], { captureId: "merge-3", source: "manual" });
+    const run3 = startConcretionRun(dbManager, "manual", 1);
+    const applied = applyConcretionPlan(dbManager, run3, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "merge",
+      scope: "global",
+      content: "Verify both sides of an adapter contract before wiring.",
+      rationale: "Both failures share one root cause.",
+      sourceEventIds: third.eventIds,
+      existingPrincipleIds: before.map((principle) => principle.id),
+    }], { charLimit: 20000 });
+
+    assert.equal(applied.merged, 1);
+    assert.equal(applied.conflicts, 0);
+    const after = getActivePrinciples(dbManager);
+    assert.equal(after.length, 1, "merge must leave exactly one active principle");
+    assert.equal(after[0]!.content, "Verify both sides of an adapter contract before wiring.");
+    const charsAfter = after.reduce((sum, principle) => sum + principle.content.length, 0);
+    assert.ok(charsAfter < charsBefore, "a merge must reduce total principle characters");
+  });
+
+  it("records a conflict when a merge cites fewer than two principles", () => {
+    const capture = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "failure",
+      content: "Single principle store.",
+    }], { captureId: "merge-invalid", source: "manual" });
+    const run = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Only principle.",
+      rationale: "Setup.",
+      sourceEventIds: capture.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+    const [only] = getActivePrinciples(dbManager);
+
+    const capture2 = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "insight",
+      content: "Another event.",
+    }], { captureId: "merge-invalid-2", source: "manual" });
+    const run2 = startConcretionRun(dbManager, "manual", 1);
+    const applied = applyConcretionPlan(dbManager, run2, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "merge",
+      scope: "global",
+      content: "Merged wording.",
+      rationale: "Invalid merge.",
+      sourceEventIds: capture2.eventIds,
+      existingPrincipleIds: [only!.id],
+    }], { charLimit: 20000 });
+
+    assert.equal(applied.merged, 0);
+    assert.equal(applied.conflicts, 1);
+    assert.equal(getActivePrinciples(dbManager).length, 1);
+  });
 });
