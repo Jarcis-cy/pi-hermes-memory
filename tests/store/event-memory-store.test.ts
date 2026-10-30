@@ -943,7 +943,8 @@ describe("event-memory-store", () => {
     assert.match(rendered, new RegExp(`\\[P${pinned.id}/global\\] ·pinned`), "pinned principle must be injected");
     assert.match(rendered, new RegExp(`\\[P${violated.id}/global\\] ·violated`), "recently violated principle keeps a contrast slot");
     assert.match(rendered, /are not shown in this run/);
-    assert.ok(rendered.length <= twoLineBudget, "rendered block must stay within the budget");
+    const prBlock = rendered.slice(rendered.indexOf("<adaptive-principles>"), rendered.indexOf("</adaptive-principles>"));
+    assert.ok(prBlock.length <= twoLineBudget, "the principle block itself must stay within the budget");
     assert.doesNotMatch(rendered, new RegExp(`\\[P${strong.id}/global\\]`), "no room left for the competing principle");
 
     // 预算充足时三条都在，且竞争档按强度排（强命中的排在前面）
@@ -1122,7 +1123,46 @@ describe("event-memory-store", () => {
     assert.match(rendered, new RegExp(`\\[P${p1.id}/project\\]`), "project rules are admitted");
     assert.match(rendered, /\[P\d+\/global\]/, "shared rules are not crowded out by scope");
     assert.match(rendered, /\[P\d+\/project\]/, "and project rules are not crowded out either");
-    assert.ok(rendered.length <= budget);
+    const mixedBlock = rendered.slice(rendered.indexOf("<adaptive-principles>"), rendered.indexOf("</adaptive-principles>"));
+    assert.ok(mixedBlock.length <= budget);
     assert.equal(getActivePrinciples(dbManager, "alpha").length, 4, "nothing is deleted by selection");
+  });
+  it("indexes the principles that did not fit, so they stay discoverable", () => {
+    const make = (cid: string, content: string) => {
+      const capture = captureMemoryEvents(dbManager, [{ scope: "global", kind: "insight", content: `${cid} evidence` }], {
+        captureId: cid, source: "manual",
+      });
+      const run = startConcretionRun(dbManager, "manual", 1);
+      applyConcretionPlan(dbManager, run, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+        action: "add", scope: "global", content, rationale: cid, sourceEventIds: capture.eventIds, existingPrincipleIds: [],
+      }], { charLimit: 20000 });
+      return getActivePrinciples(dbManager).find((principle) => principle.content === content)!;
+    };
+    const first = make("idx-1", "Verify producer output before wiring an adapter boundary.");
+    const second = make("idx-2", "Sample real utilization before raising any concurrency limit.");
+    const third = make("idx-3", "Classify lint failures against the commit range before blaming the change.");
+
+    // 只够一行全文 → 其余必须进索引
+    const generous = renderAdaptivePrinciples(dbManager, null, false, 20000);
+    const lineOf = (id: number) => generous.split("\n").find((line) => line.includes(`[P${id}/`))!;
+    const headerChars = generous.slice(0, generous.indexOf("1. [P")).length + "</adaptive-principles>".length + 1;
+    const noteChars = renderAdaptivePrinciples(dbManager, null, false, 1).split("\n").find((l) => l.includes("are not shown"))!.length + 2;
+    // 用最长的一行推预算，保证"恰好一行"能进（选择顺序按 id 降序，不一定是 first）
+    const longest = Math.max(lineOf(first.id).length, lineOf(second.id).length, lineOf(third.id).length);
+    const rendered = renderAdaptivePrinciples(dbManager, null, false, headerChars + noteChars + longest + 8);
+
+    assert.match(rendered, /<principle-index>/);
+    const prBlock = rendered.slice(rendered.indexOf("<adaptive-principles>"), rendered.indexOf("</adaptive-principles>"));
+    const shownIds = [...prBlock.matchAll(/\[P(\d+)\//g)].map((m) => Number(m[1]));
+    const indexedIds = [...rendered.matchAll(/^P(\d+) \[/gm)].map((m) => Number(m[1]));
+
+    assert.ok(shownIds.length >= 1, "at least one principle fits as full text");
+    assert.ok(indexedIds.length >= 1, "the rest are listed in the index");
+    assert.equal(shownIds.length + indexedIds.length, 3, "every principle is either injected or indexed");
+    for (const id of indexedIds) assert.equal(shownIds.includes(id), false, `P${id} must not appear twice`);
+    // 索引只给摘要，不给全文
+    const indexLine = rendered.split("\n").find((line) => /^P\d+ \[/.test(line))!;
+    assert.ok(indexLine, "index carries at least one principle line");
+    assert.ok(indexLine.length <= 90, "index lines stay short");
   });
 });

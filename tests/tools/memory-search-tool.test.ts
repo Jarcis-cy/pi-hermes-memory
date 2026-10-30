@@ -252,4 +252,18 @@ describe('registerMemorySearchTool', () => {
 
     dbManager.close();
   });
+  it("defaults to deep recall and clamps the limit at 50", async () => {
+    const dbManager = makeDbManager();
+    addMemory(dbManager, 'alpha note one', 'memory');
+    let capturedTool: any;
+    registerMemorySearchTool({ registerTool: (def: any) => { capturedTool = def; } } as any, dbManager);
+
+    const params = capturedTool.parameters as any;
+    assert.match(String(params.properties.limit.description), /default: 30, max: 50/);
+
+    const capped = await capturedTool.execute("tc-cap", { query: "alpha", limit: 999 });
+    assert.ok(capped.details.count <= 50, "an oversized limit is clamped, not honoured");
+
+    dbManager.close();
+  });
 });

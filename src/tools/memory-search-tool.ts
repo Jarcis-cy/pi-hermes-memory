@@ -59,14 +59,14 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
       target: Type.Optional(StringEnum(['memory', 'user', 'failure', 'project'] as const, { description: 'Filter by target type: memory, user, failure, or project-attributed memories.' })),
       category: Type.Optional(StringEnum(['failure', 'correction', 'insight', 'preference', 'convention', 'tool-quirk'] as const, { description: 'Filter by memory category.' })),
       entity: Type.Optional(Type.String({ description: 'Facet filter: one entity tag (ticket id, repo slug, path) derived from the event ledger, lowercase, e.g. abc-123 or owner/repo.' })),
-      limit: Type.Optional(Type.Number({ description: 'Maximum results to return (default: 10, max: 20).' })),
+      limit: Type.Optional(Type.Number({ description: 'Maximum results to return (default: 30, max: 50). Larger contexts afford deeper recall; results are charged only when you ask.' })),
     }),
     execute: async (_id: string, args: { query: string; project?: string; target?: 'memory' | 'user' | 'failure' | 'project'; category?: string; entity?: string; limit?: number }) => {
       const query = args.query;
       const project = args.project;
       const target = args.target;
       const category = args.category as MemoryCategory | undefined;
-      const limit = Math.min(args.limit || 10, 20);
+      const limit = Math.min(args.limit || 30, 50);
 
       if (!query || query.trim().length === 0) {
         const result: SearchResult = { success: false, message: 'query is required' };

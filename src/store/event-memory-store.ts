@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { DatabaseManager } from "./db.js";
 import { deriveEventEntities } from "./event-entities.js";
 import { queryCoverage, tokenSetSimilarity } from "./text-similarity.js";
-import { DEFAULT_PRINCIPLE_CHAR_LIMIT } from "../constants.js";
+import { DEFAULT_PRINCIPLE_CHAR_LIMIT, PRINCIPLE_INDEX_MAX_CHARS, PRINCIPLE_INDEX_SUMMARY_CHARS } from "../constants.js";
 
 export { deriveEventEntities } from "./event-entities.js";
 import {
@@ -504,7 +504,7 @@ export function searchMemoryEvents(
   const normalized = normalizeFts5Query(query);
   if (!normalized) return [];
   const db = dbManager.getDb();
-  const limit = Math.max(1, Math.min(options.limit ?? 10, 50));
+  const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
   let parseError = false;
   const entityTag = options.entity?.trim().toLowerCase() || null;
 
@@ -625,7 +625,7 @@ export function searchPrinciples(
 ): Array<{ principle: AdaptivePrinciple; score: number }> {
   const trimmed = query.trim();
   if (!trimmed) return [];
-  const limit = Math.max(1, Math.min(options.limit ?? 5, 20));
+  const limit = Math.max(1, Math.min(options.limit ?? 5, 50));
   const project = options.project ?? null;
   const candidates = options.scope === "user"
     ? getActivePrinciples(dbManager, null).filter((principle) => principle.scope === "user")
@@ -1544,6 +1544,42 @@ function omissionNote(omitted: number, total: number, charLimit: number): string
     + " or /memory-conflicts to review pending candidates.)";
 }
 
+/** One line per omitted principle: `P<id> [scope] summary`. Cost is ~70 chars,
+ * and it is the difference between a principle that fell out of the budget being
+ * discoverable or invisible. */
+export function buildPrincipleIndex(
+  principles: Array<{ id: number; scope: string; content: string }>,
+  maxChars: number = PRINCIPLE_INDEX_MAX_CHARS,
+): string | null {
+  if (principles.length === 0) return null;
+  const header = [
+    "<principle-index>",
+    "Principles not injected this run. They stay in force — retrieve one by id with memory_search,",
+    "or merge near-duplicates with /memory-concretize.",
+    "",
+  ];
+  const reserve = (`(${principles.length} further principles are outside the index budget; they remain searchable.)`).length;
+  let used = header.join("\n").length + "</principle-index>".length + reserve;
+  const lines: string[] = [];
+  let skipped = 0;
+  for (const principle of principles) {
+    const summary = principle.content.replace(/\s+/g, " ").trim();
+    const cut = summary.length > PRINCIPLE_INDEX_SUMMARY_CHARS
+      ? `${summary.slice(0, PRINCIPLE_INDEX_SUMMARY_CHARS - 3)}...`
+      : summary;
+    const line = `P${principle.id} [${principle.scope}] ${cut}`;
+    if (used + line.length + 1 > maxChars) {
+      skipped = principles.length - lines.length;
+      break;
+    }
+    lines.push(line);
+    used += line.length + 1;
+  }
+  if (lines.length === 0) return null;
+  if (skipped > 0) lines.push(`(${skipped} further principles are outside the index budget; they remain searchable.)`);
+  return [...header, ...lines, "</principle-index>"].join("\n");
+}
+
 /**
  * Injection is split into three registers, because selection is not one problem:
  *
@@ -1641,11 +1677,14 @@ export function renderAdaptivePrinciples(
       if (!admitted) break;
     }
 
-    const omitted = principles.length - shown.size;
+    const omittedPrinciples = principles.filter((principle) => !shown.has(principle.id));
+    const omitted = omittedPrinciples.length;
     if (omitted > 0) {
       footer.push(omissionNote(omitted, principles.length, charLimit));
     }
     blocks.push([...header, ...lines, ...footer, "</adaptive-principles>"].join("\n"));
+    const index = buildPrincipleIndex(omittedPrinciples);
+    if (index) blocks.push(index);
   }
   if (conflicts.length) {
     blocks.push([
@@ -1755,6 +1794,9 @@ export async function renderAdaptivePrinciplesFromSnapshot(
       footer.push(omissionNote(omitted, scoped.length, limit));
     }
     blocks.push([...header, ...lines, ...footer, "</adaptive-principles>"].join("\n"));
+    const shownIds = new Set(lines.map((line) => Number(line.slice(line.indexOf("[P") + 2, line.indexOf("/")))));
+    const index = buildPrincipleIndex(scoped.filter((principle) => !shownIds.has(principle.id)));
+    if (index) blocks.push(index);
   }
   const conflicts = payload.conflicts ?? [];
   if (conflicts.length) {

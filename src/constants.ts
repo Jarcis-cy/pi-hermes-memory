@@ -37,6 +37,13 @@ export const DEFAULT_CONCRETION_REVIEW_THRESHOLD = 10;
  * subprocess timeout and made the model under-classify; 40 keeps both healthy. */
 export const DEFAULT_CONCRETION_EVENT_BATCH_SIZE = 40;
 export const DEFAULT_PRINCIPLE_CHAR_LIMIT = 20000;
+/** Headroom for the discoverability index. ~70 chars per omitted principle, so
+ * this holds roughly a hundred of them (~2k tokens) — cheap next to the model's
+ * context, and it turns "not injected" into "visible by id" instead of invisible. */
+export const PRINCIPLE_INDEX_MAX_CHARS = 8000;
+/** Summary width in the index. Wide enough to recognise a rule, narrow enough to
+ * keep one line per principle. */
+export const PRINCIPLE_INDEX_SUMMARY_CHARS = 64;
 /**
  * A consolidation run pays child-process boot plus a full LLM turn, which
  * routinely exceeds 60s — at the old 60s default the auto path was killed

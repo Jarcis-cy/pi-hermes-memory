@@ -252,6 +252,22 @@ hole:
 Nothing is deleted by either path: the concrete event record stays the ground
 truth, principles are the abstraction over it.
 
+## Discoverability Index
+
+Principles that do not fit the full-text budget are not lost and not invisible: they
+are listed in a compact `<principle-index>` block (`P<id> [scope] one-line summary`,
+about 70 characters each, capped at 8,000 chars ≈ 2k tokens). The model can then
+pull any of them by id with `memory_search` instead of needing to guess that a rule
+exists. Index cost is roughly 19% of injecting the same principles as full text.
+
+Why the full-text budget stays modest even on very large contexts: at 16,000 chars
+the injected set is ≈4.7k tokens — 0.5% of a 1M window — so capacity is not the
+constraint. What a bigger budget buys is more simultaneous rules, and more rules
+means weaker adherence, more interference between defaults, and a set no human can
+audit. The working set is therefore a product decision, not a function of the model
+window; deep recall is served by `memory_search` (default 30 results, max 50) and by
+the index, both of which are paid only when used.
+
 ## Scope and Cost Notes
 
 - **Cold recall is scoped.** `memory_search` searches principles of the current
