@@ -899,4 +899,51 @@ describe("event-memory-store", () => {
     recordPrincipleFeedback(dbManager, { violated: [999999] });
     assert.equal(getActivePrinciples(dbManager)[0]!.violatedCount, 1);
   });
+  it("injects pinned, violated and competing principles through separate registers", () => {
+    const makePrinciple = (captureId: string, content: string) => {
+      const capture = captureMemoryEvents(dbManager, [{
+        scope: "global",
+        kind: "insight",
+        content: `${captureId} evidence`,
+      }], { captureId, source: "manual" });
+      const run = startConcretionRun(dbManager, "manual", 1);
+      applyConcretionPlan(dbManager, run, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+        action: "add",
+        scope: "global",
+        content,
+        rationale: captureId,
+        sourceEventIds: capture.eventIds,
+        existingPrincipleIds: [],
+      }], { charLimit: 20000 });
+      return getActivePrinciples(dbManager).find((principle) => principle.content === content)!;
+    };
+
+    const pinned = makePrinciple("pin-a", "Never persist credential values or secret material in durable memory.");
+    const violated = makePrinciple("pin-b", "Always re-read a file before retrying an anchored edit that failed.");
+    const strong = makePrinciple("pin-c", "Verify the consumer's expected field path before wiring a boundary.");
+    recordPrincipleFeedback(dbManager, { violated: [violated.id] });
+    for (let i = 0; i < 8; i++) recordPrincipleHits(dbManager, [strong.id]);
+    dbManager.getDb().prepare("UPDATE principles SET pinned = 1 WHERE id = ?").run(pinned.id);
+
+    // 推导一个"刚好装下 pinned + violated，装不下第三条"的预算，避免硬编码行长
+    const generous = renderAdaptivePrinciples(dbManager, null, false, 20000);
+    const headerChars = generous.slice(0, generous.indexOf("1. [P")).length + "</adaptive-principles>".length + 1;
+    const tiny = renderAdaptivePrinciples(dbManager, null, false, 1);
+    const noteChars = tiny.split("\n").find((line) => line.includes("are not shown"))!.length + 2;
+    const lineFor = (id: number) => generous.split("\n").find((line) => line.includes(`[P${id}/global]`))!;
+    const twoLineBudget = headerChars + noteChars + lineFor(pinned.id).length + lineFor(violated.id).length + 6;
+    const rendered = renderAdaptivePrinciples(dbManager, null, false, twoLineBudget);
+    assert.match(rendered, new RegExp(`\\[P${pinned.id}/global\\] ·pinned`), "pinned principle must be injected");
+    assert.match(rendered, new RegExp(`\\[P${violated.id}/global\\] ·violated`), "recently violated principle keeps a contrast slot");
+    assert.match(rendered, /are not shown in this run/);
+    assert.ok(rendered.length <= twoLineBudget, "rendered block must stay within the budget");
+    assert.doesNotMatch(rendered, new RegExp(`\\[P${strong.id}/global\\]`), "no room left for the competing principle");
+
+    // 预算充足时三条都在，且竞争档按强度排（强命中的排在前面）
+    const full = renderAdaptivePrinciples(dbManager, null, false, 20000);
+    assert.match(full, new RegExp(`\\[P${pinned.id}/global\\] ·pinned`));
+    assert.match(full, new RegExp(`\\[P${violated.id}/global\\] ·violated`));
+    assert.match(full, new RegExp(`\\[P${strong.id}/global\\] `));
+    assert.doesNotMatch(full, /are not shown/);
+  });
 });

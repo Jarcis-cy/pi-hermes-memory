@@ -110,6 +110,8 @@ export interface AdaptivePrinciple {
   appliedCount: number;
   violatedCount: number;
   lastFeedbackAt: string | null;
+  /** Pinned principles are felt every run regardless of relevance. */
+  pinned: boolean;
 }
 
 export type ConcretionCandidateAction = "add" | "reinforce" | "refine" | "merge" | "conflict" | "none";
@@ -208,6 +210,7 @@ function mapPrincipleRow(row: Record<string, unknown>, sourceEventIds: number[] 
     appliedCount: row.applied_count == null ? 0 : Number(row.applied_count),
     violatedCount: row.violated_count == null ? 0 : Number(row.violated_count),
     lastFeedbackAt: cleanNullable(row.last_feedback_at as string | null),
+    pinned: Number(row.pinned ?? 0) === 1,
   };
 }
 
@@ -1271,6 +1274,30 @@ function truncateForPrompt(value: string, maxChars: number): string {
   return `${value.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
+/** Single source for the omission note: the budget reserve and the rendered
+ * note must be the same string, or the block silently overshoots the limit. */
+function omissionNote(omitted: number, total: number, charLimit: number): string {
+  return `(${omitted} of ${total} active principles are not shown in this run: the ${charLimit}-character budget is full.`
+    + " They remain recallable with memory_search; run /memory-concretize to merge near-duplicates,"
+    + " or /memory-conflicts to review pending candidates.)";
+}
+
+/**
+ * Injection is split into three registers, because selection is not one problem:
+ *
+ * - **A, causal efficacy**: pinned principles (safety, authorization, explicit
+ *   user pins). Felt every run regardless of relevance — a prohibition that only
+ *   appears when it looks relevant is exactly the one that fails (#121 analogue).
+ * - **C, contrast**: active principles violated within the last 30 days. A set
+ *   that only surfaces what matches becomes an echo chamber; the ignored default
+ *   keeps a guaranteed slice.
+ * - **B, competition**: everything else, ranked by strength (use, follow,
+ *   violation recency) with scope as tiebreaker. Weak principles fall out of the
+ *   prompt but stay recallable through memory_search.
+ *
+ * Deterministic given the same database state and clock. Nothing is deleted; only
+ * the injected selection changes.
+ */
 export function renderAdaptivePrinciples(
   dbManager: DatabaseManager,
   project?: string | null,
@@ -1281,16 +1308,21 @@ export function renderAdaptivePrinciples(
   const conflicts = includeConflicts ? getRelevantPendingPrincipleConflicts(dbManager, project, 3) : [];
   const blocks: string[] = [];
   if (principles.length) {
-    // Deterministic budget order: project-scoped (most specific) first, then most
-    // recently reinforced, then newest id. The prompt must never grow without
-    // bound just because the distillation loop keeps adding principles.
-    const ordered = [...principles].sort((a, b) => {
-      const scopeRank = (principle: AdaptivePrinciple) => (principle.scope === "project" ? 0 : principle.scope === "user" ? 1 : 2);
+    const now = new Date();
+    const scopeRank = (principle: AdaptivePrinciple) => (principle.scope === "project" ? 0 : principle.scope === "user" ? 1 : 2);
+    const byPreference = (a: AdaptivePrinciple, b: AdaptivePrinciple) => {
       const byScope = scopeRank(a) - scopeRank(b);
       if (byScope !== 0) return byScope;
-      if (a.updatedAt !== b.updatedAt) return a.updatedAt < b.updatedAt ? 1 : -1;
+      const byStrength = principleStrength(b, now) - principleStrength(a, now);
+      if (byStrength !== 0) return byStrength;
       return b.id - a.id;
-    });
+    };
+    const pinned = principles.filter((principle) => principle.pinned).sort(byPreference);
+    const violated = principles
+      .filter((principle) => !principle.pinned && recentlyViolated(principle, now))
+      .sort((a, b) => (a.lastFeedbackAt === b.lastFeedbackAt ? b.violatedCount - a.violatedCount : (b.lastFeedbackAt ?? "").localeCompare(a.lastFeedbackAt ?? "")));
+    const competing = principles.filter((principle) => !principle.pinned && !violated.includes(principle)).sort(byPreference);
+
     const header = [
       "<adaptive-principles>",
       "These are generalized lessons distilled from prior events. Apply them as fallible",
@@ -1299,30 +1331,41 @@ export function renderAdaptivePrinciples(
       "",
     ];
     const footer: string[] = [];
-    // Reserve worst-case space for the omission note so the whole block stays
-    // within charLimit instead of overshooting by the note's length.
-    const omissionReserve = (`(${ordered.length} of ${ordered.length} active principles are not shown: the ${charLimit}-character principle budget is full.`
-      + " Run /memory-concretize to merge near-duplicate principles, or /memory-conflicts to review pending candidates.)").length;
+    const omissionReserve = omissionNote(principles.length, principles.length, charLimit).length;
     const budget = Math.max(0, charLimit - header.join("\n").length - "</adaptive-principles>".length - omissionReserve);
+
+    // Slice reservations inside the budget: contrast gets a guaranteed share so
+    // violations cannot be squeezed out by stronger-sounding defaults. Pinned
+    // entries are admitted first and are never dropped for lack of room unless
+    // the whole budget is exhausted (they are the safety register).
+    const contrastReserve = Math.floor(budget * 0.1);
     const lines: string[] = [];
+    const shown = new Set<number>();
     let used = 0;
-    let omitted = 0;
-    for (const [index, principle] of ordered.entries()) {
-      const line = `${index + 1}. [P${principle.id}/${principle.scope}] ${principle.content}`;
-      if (used + line.length + 1 > budget) {
-        omitted = ordered.length - index;
-        break;
-      }
+    const admit = (principle: AdaptivePrinciple, tag: string): boolean => {
+      const line = `${lines.length + 1}. [P${principle.id}/${principle.scope}]${tag} ${principle.content}`;
+      if (used + line.length + 1 > budget) return false;
       lines.push(line);
       used += line.length + 1;
+      shown.add(principle.id);
+      return true;
+    };
+
+    for (const principle of pinned) {
+      if (!admit(principle, " ·pinned")) break;
     }
+    const contrastStart = used;
+    for (const principle of violated) {
+      if (used - contrastStart >= contrastReserve && used - contrastStart > 0) break;
+      if (!admit(principle, " ·violated")) break;
+    }
+    for (const principle of competing) {
+      if (!admit(principle, "")) break;
+    }
+
+    const omitted = principles.length - shown.size;
     if (omitted > 0) {
-      // State the omission factually: nothing is lost, and the way to shrink the
-      // set is merging near-duplicates rather than dropping principles.
-      footer.push(
-        `(${omitted} of ${ordered.length} active principles are not shown: the ${charLimit}-character principle budget is full.`
-        + " Run /memory-concretize to merge near-duplicate principles, or /memory-conflicts to review pending candidates.)",
-      );
+      footer.push(omissionNote(omitted, principles.length, charLimit));
     }
     blocks.push([...header, ...lines, ...footer, "</adaptive-principles>"].join("\n"));
   }
@@ -1337,9 +1380,19 @@ export function renderAdaptivePrinciples(
         `- Conflict ${conflict.id}: ${truncateForPrompt(conflict.candidateContent, 500)} (reason: ${truncateForPrompt(conflict.reason, 300)})`
       )),
       "</memory-conflicts>",
-    ].join("\n\n"));
+    ].join("\n"));
   }
   return blocks.join("\n\n");
+}
+
+/** A violation keeps the contrast slot for this long before fading into competition. */
+const VIOLATION_CONTRAST_DAYS = 30;
+
+function recentlyViolated(principle: AdaptivePrinciple, now: Date): boolean {
+  if (principle.violatedCount === 0 || !principle.lastFeedbackAt) return false;
+  const then = Date.parse(principle.lastFeedbackAt.length === 10 ? `${principle.lastFeedbackAt}T00:00:00.000Z` : principle.lastFeedbackAt);
+  if (Number.isNaN(then)) return false;
+  return (now.getTime() - then) / 86_400_000 <= VIOLATION_CONTRAST_DAYS;
 }
 
 /** Injection-format snapshot (JSON) written beside PRINCIPLES.md so lazy
@@ -1406,8 +1459,7 @@ export async function renderAdaptivePrinciplesFromSnapshot(
       "",
     ];
     const footer: string[] = [];
-    const omissionReserve = (`(${scoped.length} of ${scoped.length} active principles are not shown: the ${limit}-character principle budget is full.`
-      + " Run /memory-concretize to merge near-duplicate principles, or /memory-conflicts to review pending candidates.)").length;
+    const omissionReserve = omissionNote(scoped.length, scoped.length, limit).length;
     const budget = Math.max(0, limit - header.join("\n").length - "</adaptive-principles>".length - omissionReserve);
     const lines: string[] = [];
     let used = 0;
@@ -1422,10 +1474,7 @@ export async function renderAdaptivePrinciplesFromSnapshot(
       used += line.length + 1;
     }
     if (omitted > 0) {
-      footer.push(
-        `(${omitted} of ${scoped.length} active principles are not shown: the ${limit}-character principle budget is full.`
-        + " Run /memory-concretize to merge near-duplicate principles, or /memory-conflicts to review pending candidates.)",
-      );
+      footer.push(omissionNote(omitted, scoped.length, limit));
     }
     blocks.push([...header, ...lines, ...footer, "</adaptive-principles>"].join("\n"));
   }

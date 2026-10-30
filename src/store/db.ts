@@ -1187,6 +1187,9 @@ export class DatabaseManager {
     if (!names.has('last_feedback_at')) {
       db.exec('ALTER TABLE principles ADD COLUMN last_feedback_at DATE');
     }
+    if (!names.has('pinned')) {
+      db.exec('ALTER TABLE principles ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
+    }
   }
 
   private ensureMemoryEventsColumns(db: DatabaseLike): void {

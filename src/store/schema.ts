@@ -201,7 +201,11 @@ export const SCHEMA_SQL = `
     last_hit_at DATE,
     applied_count INTEGER NOT NULL DEFAULT 0,
     violated_count INTEGER NOT NULL DEFAULT 0,
-    last_feedback_at DATE
+    last_feedback_at DATE,
+    -- Causal-efficacy register: a pinned principle is felt in every run
+    -- regardless of relevance (safety invariants, authorization boundaries,
+    -- explicit user pins). Pinning is user-controlled only, never model-chosen.
+    pinned INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS principle_sources (
