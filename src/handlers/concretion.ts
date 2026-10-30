@@ -247,6 +247,7 @@ export async function runConcretion(
     const runDirect = deps.runDirectJsonCompletion ?? runDirectJsonCompletion;
     const runChild = deps.execChildPrompt ?? execChildPrompt;
     let candidates: ConcretionCandidate[] | null = null;
+    let directParseExcerpt: string | undefined;
 
     if (usesDirectTransport(config)) {
       try {
@@ -256,7 +257,14 @@ export async function runConcretion(
           config,
           timeoutMs: config.consolidationTimeoutMs,
         });
-        if (direct.ok) candidates = parseConcretionResponse(direct.text);
+        if (direct.ok) {
+          candidates = parseConcretionResponse(direct.text);
+          // Keep an excerpt: if the fallback also fails, the error must say WHAT
+          // the model actually returned, not just that it was unparsable.
+          if (candidates === null) {
+            directParseExcerpt = (direct.text ?? "").replace(/\s+/g, " ").trim().slice(0, 400) || "(empty)";
+          }
+        }
       } catch {
         // Fall through to isolated subprocess.
       }
@@ -271,7 +279,10 @@ export async function runConcretion(
       );
       if (child.code !== 0) throw new Error(`Concretion subprocess exited with code ${child.code}.`);
       candidates = parseConcretionResponse(child.stdout ?? "");
-      if (candidates === null) throw new Error("Concretion returned invalid JSON.");
+      if (candidates === null) {
+        const excerpt = (child.stdout ?? "").replace(/\s+/g, " ").trim().slice(0, 400) || directParseExcerpt || "(empty)";
+        throw new Error(`Concretion returned invalid JSON. Raw (truncated): ${excerpt}`);
+      }
     }
 
     // The model occasionally cites source-event ids from outside this locked
@@ -342,7 +353,7 @@ export function registerConcretionCommand(
         return;
       }
       ctx.ui.notify(
-        `Memory concretion reviewed ${result.eventCount} event(s): ${result.added} added, ${result.refined} refined, ${result.reinforced} reinforced, ${result.conflicts} conflict(s).`,
+        `Memory concretion reviewed ${result.eventCount} event(s): ${result.added} added, ${result.refined} refined, ${result.reinforced} reinforced, ${result.merged} merged, ${result.conflicts} conflict(s), ${result.ignored} classified as needing no principle, ${result.skipped} skipped, ${result.unclassified} left pending.`,
         result.conflicts > 0 ? "warning" : "info",
       );
     },
