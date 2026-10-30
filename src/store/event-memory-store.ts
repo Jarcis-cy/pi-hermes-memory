@@ -718,6 +718,136 @@ const PRINCIPLE_NEAR_DUPLICATE_THRESHOLD = 0.85;
  */
 const PRINCIPLE_POSSIBLE_RESTATEMENT_THRESHOLD = 0.65;
 
+/** Ids a row replaced, oldest column first: JSON list when present, else the
+ * legacy single pointer. */
+function supersededIdsOf(row: { supersedes_id?: unknown; superseded_ids?: unknown }): number[] {
+  const raw = row.superseded_ids;
+  if (typeof raw === "string" && raw.trim().startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) return parsed.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0);
+    } catch {
+      // fall through to the legacy pointer
+    }
+  }
+  const single = row.supersedes_id == null ? null : Number(row.supersedes_id);
+  return single && Number.isSafeInteger(single) ? [single] : [];
+}
+
+export interface RetirePrincipleResult {
+  retired: number;
+  /** Predecessors put back into service because their only successor just retired. */
+  restored: number[];
+  error?: string;
+}
+
+/**
+ * Retire an active principle WITHOUT orphaning the principles it replaced.
+ *
+ * Lineage is a chain: a refined/merged successor is the only living carrier of its
+ * predecessors. Retiring it (as happened in a live maintenance session: a merge's
+ * echo was retired, silently dropping six real principles out of injection) leaves
+ * those predecessors stranded as `superseded` with nothing active carrying them.
+ * So retirement restores every predecessor that this row was the last living
+ * successor of. Nothing is deleted; the chain stays walkable.
+ */
+export function retirePrinciple(
+  dbManager: DatabaseManager,
+  principleId: number,
+  reason: string,
+): RetirePrincipleResult {
+  const db = dbManager.getDb();
+  const row = db.prepare(
+    "SELECT id, status, rationale, supersedes_id, superseded_ids FROM principles WHERE id = ?",
+  ).get(principleId) as { id: number; status: string; rationale: string | null; supersedes_id: number | null; superseded_ids: string | null } | undefined;
+  if (!row) return { retired: 0, restored: [], error: `Principle ${principleId} was not found.` };
+  if (row.status !== "active") {
+    return { retired: 0, restored: [], error: `Principle ${principleId} is ${row.status}, not active; nothing to retire.` };
+  }
+
+  const restored: number[] = [];
+  const apply = () => {
+    const note = `Retired: ${reason}`;
+    db.prepare(
+      "UPDATE principles SET status = 'rejected', updated_at = ?, rationale = ? WHERE id = ? AND status = 'active'",
+    ).run(nowIso(), row.rationale ? `${row.rationale} | ${note}` : note, principleId);
+    restored.push(...restoreOrphanedPredecessors(db, principleId));
+  };
+  const transaction = db.transaction?.(apply);
+  if (transaction) transaction();
+  else apply();
+  return { retired: principleId, restored };
+}
+
+/** Predecessors of `principleId` that have no other active successor. */
+function restoreOrphanedPredecessors(
+  db: ReturnType<DatabaseManager["getDb"]>,
+  principleId: number,
+): number[] {
+  const successor = db.prepare("SELECT supersedes_id, superseded_ids FROM principles WHERE id = ?")
+    .get(principleId) as { supersedes_id: number | null; superseded_ids: string | null } | undefined;
+  if (!successor) return [];
+  const predecessors = supersededIdsOf(successor);
+  if (predecessors.length === 0) return [];
+
+  // Who else could still carry these predecessors? Parse ids in JS: a LIKE '%12%'
+  // probe would also match 112 and 120.
+  const others = db.prepare(
+    "SELECT id, supersedes_id, superseded_ids FROM principles WHERE status = 'active' AND id != ?",
+  ).all(principleId) as Array<{ id: number; supersedes_id: number | null; superseded_ids: string | null }>;
+  const stillCarried = new Set<number>();
+  for (const other of others) {
+    for (const predecessorId of supersededIdsOf(other)) stillCarried.add(predecessorId);
+  }
+
+  const restored: number[] = [];
+  for (const predecessorId of predecessors) {
+    if (stillCarried.has(predecessorId)) continue;
+    const changed = db.prepare(
+      "UPDATE principles SET status = 'active', updated_at = ? WHERE id = ? AND status = 'superseded'",
+    ).run(nowIso(), predecessorId);
+    if (Number(changed.changes ?? 0) > 0) restored.push(predecessorId);
+  }
+  return restored;
+}
+
+/**
+ * Read-only report of broken lineage: a principle that is still `superseded` but
+ * whose every successor has itself been retired. That state silently removed six
+ * real principles from injection in a live maintenance session.
+ */
+export function findOrphanedLineage(
+  dbManager: DatabaseManager,
+): Array<{ predecessorId: number; retiredSuccessors: number[] }> {
+  const db = dbManager.getDb();
+  const rows = db.prepare(
+    "SELECT id, status, supersedes_id, superseded_ids FROM principles WHERE supersedes_id IS NOT NULL OR superseded_ids IS NOT NULL",
+  ).all() as Array<{ id: number; status: string; supersedes_id: number | null; superseded_ids: string | null }>;
+
+  const activeCarriers = new Set<number>();
+  for (const row of rows) {
+    if (row.status !== "active") continue;
+    for (const predecessorId of supersededIdsOf(row)) activeCarriers.add(predecessorId);
+  }
+
+  const orphans = new Map<number, number[]>();
+  for (const row of rows) {
+    if (row.status === "active") continue;
+    for (const predecessorId of supersededIdsOf(row)) {
+      if (activeCarriers.has(predecessorId)) continue;
+      const list = orphans.get(predecessorId) ?? [];
+      list.push(row.id);
+      orphans.set(predecessorId, list);
+    }
+  }
+  return [...orphans.entries()]
+    .filter(([predecessorId]) => {
+      const state = db.prepare("SELECT status FROM principles WHERE id = ?").get(predecessorId) as { status: string } | undefined;
+      return state?.status === "superseded";
+    })
+    .map(([predecessorId, retiredSuccessors]) => ({ predecessorId, retiredSuccessors }));
+}
+
 /** Record one cold recall per principle (batched). Failures never break search. */
 export function recordPrincipleHits(dbManager: DatabaseManager, ids: number[]): void {
   if (ids.length === 0) return;
@@ -896,9 +1026,19 @@ function addPrincipleInTransaction(
   }
   const stamp = nowIso();
   const inserted = db.prepare(`
-    INSERT INTO principles (scope, project, content, rationale, status, supersedes_id, created_at, updated_at, pinned)
-    VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
-  `).run(input.scope, project, content, rationale, supersedesIds[0] ?? null, stamp, stamp, inheritsPin ? 1 : 0) as { lastInsertRowid: number | bigint };
+    INSERT INTO principles (scope, project, content, rationale, status, supersedes_id, superseded_ids, created_at, updated_at, pinned)
+    VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+  `).run(
+    input.scope,
+    project,
+    content,
+    rationale,
+    supersedesIds[0] ?? null,
+    supersedesIds.length ? JSON.stringify(supersedesIds) : null,
+    stamp,
+    stamp,
+    inheritsPin ? 1 : 0,
+  ) as { lastInsertRowid: number | bigint };
   const principleId = Number(inserted.lastInsertRowid);
   linkPrincipleSources(db, principleId, input.sourceEventIds);
   return { principleId };

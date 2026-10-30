@@ -1190,6 +1190,9 @@ export class DatabaseManager {
     if (!names.has('pinned')) {
       db.exec('ALTER TABLE principles ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
     }
+    if (!names.has('superseded_ids')) {
+      db.exec('ALTER TABLE principles ADD COLUMN superseded_ids TEXT');
+    }
   }
 
   private ensureMemoryEventsColumns(db: DatabaseLike): void {
