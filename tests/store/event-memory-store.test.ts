@@ -946,4 +946,43 @@ describe("event-memory-store", () => {
     assert.match(full, new RegExp(`\\[P${strong.id}/global\\] `));
     assert.doesNotMatch(full, /are not shown/);
   });
+  it("carries a pin onto the successor when a pinned principle is refined or merged", () => {
+    const first = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "insight",
+      content: "Credential handling evidence.",
+    }], { captureId: "pin-carry-1", source: "manual" });
+    const run1 = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run1, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Never persist credential values or secret material in durable memory.",
+      rationale: "Safety",
+      sourceEventIds: first.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+    const [original] = getActivePrinciples(dbManager);
+    dbManager.getDb().prepare("UPDATE principles SET pinned = 1 WHERE id = ?").run(original!.id);
+
+    // 细化：后继必须继承 pin，否则安全寄存器会因为"被改进"而消失
+    const second = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "correction",
+      content: "Credential expansion evidence.",
+    }], { captureId: "pin-carry-2", source: "manual" });
+    const run2 = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run2, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "refine",
+      scope: "global",
+      content: "Never persist credential values or secret material in durable memory; retain only non-sensitive authentication behavior or configuration contracts needed for future work.",
+      rationale: "Expand with the boundary.",
+      sourceEventIds: second.eventIds,
+      existingPrincipleIds: [original!.id],
+    }], { charLimit: 20000 });
+
+    const active = getActivePrinciples(dbManager);
+    assert.equal(active.length, 1);
+    assert.equal(active[0]!.pinned, true, "the successor of a pinned principle must stay pinned");
+    assert.equal(active[0]!.supersedesId, original!.id);
+  });
 });

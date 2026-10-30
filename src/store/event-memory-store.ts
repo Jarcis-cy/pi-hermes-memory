@@ -840,16 +840,25 @@ function addPrincipleInTransaction(
     return { overCapacity: true };
   }
 
+  // A pinned principle is a user-stated invariant. Refining or merging it must not
+  // silently drop it out of the always-injected register: the successor inherits
+  // the pin. (Observed live: automatic concretion refined the only pinned safety
+  // rule, superseded it, and the causal-efficacy register became empty.)
+  let inheritsPin = false;
   if (supersedesIds.length) {
     const placeholders = supersedesIds.map(() => "?").join(", ");
+    const pinnedRow = db.prepare(
+      `SELECT 1 AS present FROM principles WHERE status = 'active' AND pinned = 1 AND id IN (${placeholders}) LIMIT 1`,
+    ).get(...supersedesIds) as { present?: number } | undefined;
+    inheritsPin = pinnedRow?.present === 1;
     db.prepare(`UPDATE principles SET status = 'superseded', updated_at = ? WHERE status = 'active' AND id IN (${placeholders})`)
       .run(nowIso(), ...supersedesIds);
   }
   const stamp = nowIso();
   const inserted = db.prepare(`
-    INSERT INTO principles (scope, project, content, rationale, status, supersedes_id, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
-  `).run(input.scope, project, content, rationale, supersedesIds[0] ?? null, stamp, stamp) as { lastInsertRowid: number | bigint };
+    INSERT INTO principles (scope, project, content, rationale, status, supersedes_id, created_at, updated_at, pinned)
+    VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
+  `).run(input.scope, project, content, rationale, supersedesIds[0] ?? null, stamp, stamp, inheritsPin ? 1 : 0) as { lastInsertRowid: number | bigint };
   const principleId = Number(inserted.lastInsertRowid);
   linkPrincipleSources(db, principleId, input.sourceEventIds);
   return { principleId };
