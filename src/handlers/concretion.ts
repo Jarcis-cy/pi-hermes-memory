@@ -51,6 +51,13 @@ Compare every candidate with the active principles:
   merged wording in content. A merge is the ONLY way to shrink a store that is over budget,
   so prefer it whenever the budget note below says the set is full or nearly full;
 - conflict: incompatible, ambiguous, or tradeoff-bearing candidate; never decide silently;
+
+Self-reference warning: sessions that operate ON the memory system (merging principles,
+resolving conflicts, tuning budgets) produce events that describe principles already in
+force. When an event reports the agent applying, renaming, merging, or testing an existing
+principle, classify it as reinforce of that principle — or as none — never as a new
+principle that restates what is already in force. The same applies to any event quoting
+text that is already an active principle.
 - none: no principle should be formed from those events.
 
 Every supplied event MUST appear in at least one candidate's source_event_ids. Group related events in one candidate when appropriate. If an event does not support any principle, include it in an action "none" candidate. Every non-none candidate MUST cite valid source_event_ids from the supplied batch. A project-scoped principle must cite events from exactly one project. Existing principle IDs must be copied exactly. Do not call tools or modify storage.
