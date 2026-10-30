@@ -1118,6 +1118,17 @@ export async function runDirectMemoryCompletion(
         if (mi < models.length - 1) { clearTimeout(timeout); continue; }
         return lastResult;
       }
+      // Principle prehension is independent of whether anything was saved: a
+      // review may observe a principle being followed or ignored while finding
+      // no new memory worth writing. Best-effort — never fail a review for it.
+      try {
+        const feedback = parsePrincipleFeedback(text);
+        if (dbManager && (feedback.applied.length > 0 || feedback.violated.length > 0)) {
+          recordPrincipleFeedback(dbManager, feedback);
+        }
+      } catch {
+        // ignored on purpose
+      }
       if (operations.length === 0) {
         clearTimeout(timeout);
         return { ok: true, appliedCount: 0, fallbackReason: "empty" };
@@ -1138,17 +1149,6 @@ export async function runDirectMemoryCompletion(
           signal: options.signal,
         },
       );
-      // Principle prehension: the review reports which injected principles it
-      // saw clearly followed or ignored. Best-effort — feedback must never turn
-      // a successful review into a failure.
-      try {
-        const feedback = parsePrincipleFeedback(text);
-        if (dbManager && (feedback.applied.length > 0 || feedback.violated.length > 0)) {
-          recordPrincipleFeedback(dbManager, feedback);
-        }
-      } catch {
-        // ignored on purpose
-      }
       if (applied.aborted && applied.appliedCount === 0) {
         return aborted();
       }

@@ -225,7 +225,7 @@ event that matches the query is never pushed down just because it is old:
 Episodic events also carry a deterministic **facet index** (`entities`): ticket IDs
 (`IAR-1839`), repo/package slugs (`owner/repo`), and dotted/path-like identifiers are
 derived at capture time without an extra LLM call. Filter with
-`memory_search(query, entity: "iar-1839")` to recall by actor instead of by wording.
+`memory_search(query, entity: "abc-123")` to recall by actor instead of by wording.
 The column is added to existing ledgers automatically on open.
 
 ## Principle Layer: Cold Recall and the Encoding Gate
@@ -271,6 +271,23 @@ Review verdicts are optional in the review payload
 (`"principle_feedback": {"applied": [ids], "violated": [ids]}`, ids as shown in
 `[P<id>/<scope>]`), validated, capped at 20 ids per verdict, and applied
 best-effort so they can never fail a review.
+
+## Scope: mechanism vs data
+
+Everything in the memory mechanism is project- and language-agnostic: the ledger,
+retrieval ranking, facet derivation, budgeted injection, the three registers, the
+encoding gate and prehension accounting carry no assumption about a particular
+repository, ticket scheme, or natural language. Project specifics live only in
+the *data* (event content, principle wording, project scopes).
+
+Two consequences worth preserving when extending it:
+
+- **Script coverage** — tokenization accepts any Unicode letter or digit as a word
+  and keeps CJK bigrams, so retrieval and the near-duplicate gate work for
+  non-Latin languages instead of silently dropping their tokens. ASCII-only suffix
+  folding is applied only to ASCII words.
+- **No domain vocabulary in code or prompts** — examples in tool descriptions use
+  neutral identifiers (`abc-123`, `owner/repo`), never a specific product's keys.
 
 ## Three Injection Registers
 
