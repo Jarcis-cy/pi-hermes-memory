@@ -168,3 +168,23 @@ describe("concretion budget guidance", () => {
     assert.doesNotMatch(prompt, /OVER budget/);
   });
 });
+
+describe("concretion out-of-batch sanitization", () => {
+  it("keeps in-batch source ids and drops foreign ones instead of failing the run", () => {
+    // 语义与 runConcretion 中的净化一致：保留本批 id，丢弃越界 id，
+    // 丢弃后没有源事件的候选整条移除（none 动作除外）。
+    const batchIds = new Set([11, 12]);
+    const parsed = [
+      { action: "add", scope: "global", content: "A", sourceEventIds: [11, 999], existingPrincipleIds: [] },
+      { action: "add", scope: "global", content: "B", sourceEventIds: [777], existingPrincipleIds: [] },
+      { action: "none", scope: "global", content: "C", sourceEventIds: [888], existingPrincipleIds: [] },
+    ];
+    const sanitized = parsed
+      .map((candidate) => ({ ...candidate, sourceEventIds: [...new Set(candidate.sourceEventIds.filter((id) => batchIds.has(id)))] }))
+      .filter((candidate) => candidate.action === "none" || candidate.sourceEventIds.length > 0);
+
+    assert.equal(sanitized.length, 2);
+    assert.deepEqual(sanitized[0]!.sourceEventIds, [11]);
+    assert.equal(sanitized[1]!.action, "none");
+  });
+});

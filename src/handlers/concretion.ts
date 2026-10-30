@@ -270,6 +270,19 @@ export async function runConcretion(
       if (candidates === null) throw new Error("Concretion returned invalid JSON.");
     }
 
+    // The model occasionally cites source-event ids from outside this locked
+    // batch (older runs, or invented). Provenance beyond the batch is not worth
+    // failing a whole run: keep the in-batch ids, drop the rest, and drop
+    // candidates that end up with none. Coverage of the batch is still enforced
+    // by applyConcretionPlan, so an unclassified event remains a hard failure.
+    const batchIds = new Set(lockedEvents.map((event) => event.id));
+    candidates = candidates
+      .map((candidate) => ({
+        ...candidate,
+        sourceEventIds: [...new Set(candidate.sourceEventIds.filter((id) => batchIds.has(id)))],
+      }))
+      .filter((candidate) => candidate.action === "none" || candidate.sourceEventIds.length > 0);
+
     const applied = applyConcretionPlan(dbManager, runId, lockedEvents, candidates, {
       charLimit: config.principleCharLimit ?? DEFAULT_PRINCIPLE_CHAR_LIMIT,
     });
