@@ -100,7 +100,7 @@ export function registerMemoryConflictsCommand(
         ctx.ui.notify(result.message, "error");
         return;
       }
-      await writePrinciplesSnapshot(dbManager, path.join(globalDir, PRINCIPLES_FILE));
+      await writePrinciplesSnapshot(dbManager, path.join(globalDir, PRINCIPLES_FILE), principleCharLimit);
       ctx.ui.notify(result.message, "info");
     },
   });

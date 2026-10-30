@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { DatabaseManager } from "./db.js";
 import { deriveEventEntities } from "./event-entities.js";
+import { DEFAULT_PRINCIPLE_CHAR_LIMIT } from "../constants.js";
 
 export { deriveEventEntities } from "./event-entities.js";
 import {
@@ -103,7 +104,7 @@ export interface AdaptivePrinciple {
   sourceEventIds: number[];
 }
 
-export type ConcretionCandidateAction = "add" | "reinforce" | "refine" | "conflict" | "none";
+export type ConcretionCandidateAction = "add" | "reinforce" | "refine" | "merge" | "conflict" | "none";
 
 export interface ConcretionCandidate {
   action: ConcretionCandidateAction;
@@ -135,6 +136,8 @@ export interface ApplyConcretionResult {
   added: number;
   reinforced: number;
   refined: number;
+  /** Principles merged into one (the only action that can shrink the store). */
+  merged: number;
   conflicts: number;
   ignored: number;
   concretedEvents: number;
@@ -775,6 +778,7 @@ export function applyConcretionPlan(
     added: 0,
     reinforced: 0,
     refined: 0,
+    merged: 0,
     conflicts: 0,
     ignored: 0,
     concretedEvents: 0,
@@ -872,7 +876,32 @@ export function applyConcretionPlan(
         continue;
       }
 
-      const supersedesIds = candidate.action === "refine" ? relevantExistingIds.slice(0, 1) : [];
+      if (candidate.action === "merge") {
+        // A merge must shrink the store: require at least two active principles
+        // in this scope and reject silently-dropped ids (a partial merge would
+        // supersede principles the model never saw).
+        const cited = [...new Set(candidate.existingPrincipleIds ?? [])];
+        if (cited.length < 2 || relevantExistingIds.length !== cited.length) {
+          recordConflictInTransaction(db, {
+            scope,
+            project,
+            content,
+            rationale,
+            conflictingPrincipleIds: relevantExistingIds,
+            sourceEventIds,
+            reason: "Merge did not identify at least two active principles in the same scope.",
+          });
+          result.conflicts++;
+          for (const eventId of sourceEventIds) consumedEventIds.add(eventId);
+          continue;
+        }
+      }
+
+      const supersedesIds = candidate.action === "refine"
+        ? relevantExistingIds.slice(0, 1)
+        : candidate.action === "merge"
+          ? relevantExistingIds
+          : [];
       if (candidate.action === "refine") {
         const existing = supersedesIds.length === 1
           ? db.prepare(`
@@ -927,6 +956,8 @@ export function applyConcretionPlan(
         result.conflicts++;
       } else if (added.duplicateId) {
         result.reinforced++;
+      } else if (candidate.action === "merge") {
+        result.merged = (result.merged ?? 0) + 1;
       } else if (candidate.action === "refine") {
         result.refined++;
       } else {
@@ -1085,20 +1116,52 @@ export function renderAdaptivePrinciples(
   dbManager: DatabaseManager,
   project?: string | null,
   includeConflicts = true,
+  charLimit: number = DEFAULT_PRINCIPLE_CHAR_LIMIT,
 ): string {
   const principles = getActivePrinciples(dbManager, project);
   const conflicts = includeConflicts ? getRelevantPendingPrincipleConflicts(dbManager, project, 3) : [];
   const blocks: string[] = [];
   if (principles.length) {
-    blocks.push([
+    // Deterministic budget order: project-scoped (most specific) first, then most
+    // recently reinforced, then newest id. The prompt must never grow without
+    // bound just because the distillation loop keeps adding principles.
+    const ordered = [...principles].sort((a, b) => {
+      const scopeRank = (principle: AdaptivePrinciple) => (principle.scope === "project" ? 0 : principle.scope === "user" ? 1 : 2);
+      const byScope = scopeRank(a) - scopeRank(b);
+      if (byScope !== 0) return byScope;
+      if (a.updatedAt !== b.updatedAt) return a.updatedAt < b.updatedAt ? 1 : -1;
+      return b.id - a.id;
+    });
+    const header = [
       "<adaptive-principles>",
       "These are generalized lessons distilled from prior events. Apply them as fallible",
       "behavioral defaults. Current user instructions and current evidence override them.",
       "Do not claim to remember a source event unless you retrieve it with memory_search.",
       "",
-      ...principles.map((principle, index) => `${index + 1}. [P${principle.id}/${principle.scope}] ${principle.content}`),
-      "</adaptive-principles>",
-    ].join("\n"));
+    ];
+    const footer: string[] = [];
+    const budget = Math.max(0, charLimit - header.join("\n").length - "</adaptive-principles>".length);
+    const lines: string[] = [];
+    let used = 0;
+    let omitted = 0;
+    for (const [index, principle] of ordered.entries()) {
+      const line = `${index + 1}. [P${principle.id}/${principle.scope}] ${principle.content}`;
+      if (used + line.length + 1 > budget) {
+        omitted = ordered.length - index;
+        break;
+      }
+      lines.push(line);
+      used += line.length + 1;
+    }
+    if (omitted > 0) {
+      // State the omission factually: nothing is lost, and the way to shrink the
+      // set is merging near-duplicates rather than dropping principles.
+      footer.push(
+        `(${omitted} of ${ordered.length} active principles are not shown: the ${charLimit}-character principle budget is full.`
+        + " Run /memory-concretize to merge near-duplicate principles, or /memory-conflicts to review pending candidates.)",
+      );
+    }
+    blocks.push([...header, ...lines, ...footer, "</adaptive-principles>"].join("\n"));
   }
   if (conflicts.length) {
     blocks.push([
@@ -1111,7 +1174,7 @@ export function renderAdaptivePrinciples(
         `- Conflict ${conflict.id}: ${truncateForPrompt(conflict.candidateContent, 500)} (reason: ${truncateForPrompt(conflict.reason, 300)})`
       )),
       "</memory-conflicts>",
-    ].join("\n"));
+    ].join("\n\n"));
   }
   return blocks.join("\n\n");
 }
@@ -1127,8 +1190,10 @@ async function writePrinciplesInjectionSnapshot(
   principles: AdaptivePrinciple[],
   conflicts: PrincipleConflict[],
   filePath: string,
+  charLimit: number,
 ): Promise<void> {
   const payload = {
+    charLimit,
     principles: principles.map((principle): InjectionPrinciple => ({
       id: principle.id,
       scope: principle.scope,
@@ -1156,7 +1221,7 @@ export async function renderAdaptivePrinciplesFromSnapshot(
   dir: string,
   project?: string | null,
 ): Promise<string> {
-  let payload: { principles?: InjectionPrinciple[]; conflicts?: InjectionConflict[] };
+  let payload: { charLimit?: number; principles?: InjectionPrinciple[]; conflicts?: InjectionConflict[] };
   try {
     payload = JSON.parse(await fs.readFile(path.join(dir, PRINCIPLES_INJECTION_FILE), "utf8")) as typeof payload;
   } catch {
@@ -1169,15 +1234,35 @@ export async function renderAdaptivePrinciplesFromSnapshot(
   );
   const blocks: string[] = [];
   if (scoped.length) {
-    blocks.push([
+    const limit = payload.charLimit ?? DEFAULT_PRINCIPLE_CHAR_LIMIT;
+    const header = [
       "<adaptive-principles>",
       "These are generalized lessons distilled from prior events. Apply them as fallible",
       "behavioral defaults. Current user instructions and current evidence override them.",
       "Do not claim to remember a source event unless you retrieve it with memory_search.",
       "",
-      ...scoped.map((principle, index) => `${index + 1}. [P${principle.id}/${principle.scope}] ${principle.content}`),
-      "</adaptive-principles>",
-    ].join("\n"));
+    ];
+    const footer: string[] = [];
+    const budget = Math.max(0, limit - header.join("\n").length - "</adaptive-principles>".length);
+    const lines: string[] = [];
+    let used = 0;
+    let omitted = 0;
+    for (const [index, principle] of scoped.entries()) {
+      const line = `${index + 1}. [P${principle.id}/${principle.scope}] ${principle.content}`;
+      if (used + line.length + 1 > budget) {
+        omitted = scoped.length - index;
+        break;
+      }
+      lines.push(line);
+      used += line.length + 1;
+    }
+    if (omitted > 0) {
+      footer.push(
+        `(${omitted} of ${scoped.length} active principles are not shown: the ${limit}-character principle budget is full.`
+        + " Run /memory-concretize to merge near-duplicate principles, or /memory-conflicts to review pending candidates.)",
+      );
+    }
+    blocks.push([...header, ...lines, ...footer, "</adaptive-principles>"].join("\n"));
   }
   const conflicts = payload.conflicts ?? [];
   if (conflicts.length) {
@@ -1194,10 +1279,14 @@ export async function renderAdaptivePrinciplesFromSnapshot(
   return blocks.join("\n\n");
 }
 
-export async function writePrinciplesSnapshot(dbManager: DatabaseManager, filePath: string): Promise<void> {
+export async function writePrinciplesSnapshot(
+  dbManager: DatabaseManager,
+  filePath: string,
+  charLimit: number = DEFAULT_PRINCIPLE_CHAR_LIMIT,
+): Promise<void> {
   const principles = getAllActivePrinciples(dbManager);
   const conflicts = getPendingPrincipleConflicts(dbManager, 100);
-  await writePrinciplesInjectionSnapshot(principles, conflicts, path.join(path.dirname(filePath), PRINCIPLES_INJECTION_FILE));
+  await writePrinciplesInjectionSnapshot(principles, conflicts, path.join(path.dirname(filePath), PRINCIPLES_INJECTION_FILE), charLimit);
   const lines = [
     "# Adaptive Principles",
     "",
