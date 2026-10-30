@@ -992,4 +992,66 @@ describe("event-memory-store", () => {
     assert.equal(active[0]!.pinned, true, "the successor of a pinned principle must stay pinned");
     assert.equal(active[0]!.supersedesId, original!.id);
   });
+  it("parks a reworded copy as a possible-restatement conflict instead of adding it", () => {
+    const first = captureMemoryEvents(dbManager, [{ scope: "global", kind: "failure", content: "Adapter wiring failed." }], {
+      captureId: "reword-1", source: "manual",
+    });
+    const run1 = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run1, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Verify the consumer's expected field path before wiring an adapter boundary.",
+      rationale: "Consumer mismatch.",
+      sourceEventIds: first.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+
+    // 同一规则换措辞（相似度落在 0.65-0.85 带）→ 既不是静默新增，也不是静默吸收
+    const second = captureMemoryEvents(dbManager, [{ scope: "global", kind: "failure", content: "Adapter wiring failed again." }], {
+      captureId: "reword-2", source: "manual",
+    });
+    const run2 = startConcretionRun(dbManager, "manual", 1);
+    const applied = applyConcretionPlan(dbManager, run2, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Verify the consumer's expected field path and route before wiring a new adapter boundary.",
+      rationale: "Same rule, reworded.",
+      sourceEventIds: second.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+
+    assert.equal(applied.added, 0, "a reworded copy must not become a second principle");
+    assert.equal(applied.reinforced, 0, "nor be silently absorbed when nuance may differ");
+    assert.equal(applied.conflicts, 1, "it is parked for a human merge/keep decision");
+    assert.equal(getActivePrinciples(dbManager).length, 1);
+    const conflict = dbManager.getDb().prepare("SELECT reason FROM principle_conflicts WHERE status='pending'").get() as { reason: string };
+    assert.match(conflict.reason, /Possible restatement of P\d+ \(similarity 0\.\d\d\)/);
+  });
+
+  it("normalizes a project-scoped conflict that has no project, so accepting it can work", () => {
+    const capture = captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "convention",
+      content: "Project alpha uses pnpm.",
+    }], { captureId: "scope-fix", source: "manual", project: "alpha" });
+    const runId = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, runId, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "conflict",
+      scope: "project",
+      content: "Project alpha should use pnpm everywhere.",
+      rationale: "Parked without a project binding.",
+      sourceEventIds: capture.eventIds,
+      existingPrincipleIds: [],
+      conflictReason: "needs a decision",
+    }], { charLimit: 20000 });
+
+    const row = dbManager.getDb().prepare(
+      "SELECT id, candidate_scope, candidate_project FROM principle_conflicts WHERE status='pending'",
+    ).get() as { id: number; candidate_scope: string; candidate_project: string | null };
+    assert.equal(row.candidate_scope, "project");
+    assert.equal(row.candidate_project, "alpha", "the single source project is adopted instead of NULL");
+
+    const resolved = resolvePrincipleConflict(dbManager, row.id, "accept_candidate", 20000);
+    assert.equal(resolved.success, true, "the parked candidate is now actionable");
+  });
 });

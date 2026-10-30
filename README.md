@@ -249,6 +249,20 @@ hole:
 Nothing is deleted by either path: the concrete event record stays the ground
 truth, principles are the abstraction over it.
 
+## Scope and Cost Notes
+
+- **Cold recall is scoped.** `memory_search` searches principles of the current
+  project view (global + user + that project). A principle from another project is
+  reachable only by passing that project name explicitly; there is no implicit
+  all-projects search, by design (cross-project noise).
+- **`user`-scoped principles are the most expensive slot.** Every view includes
+  them, so one user principle raises the budget use of *every* project view. Prefer
+  `global` for cross-task defaults and `project` for repo-specific rules.
+- **Concretion shares the consolidation timeout.** There is no separate
+  `concretionTimeoutMs`: concretion prompts run under `consolidationTimeoutMs`
+  (default 180s). A subprocess kill therefore shows up as exit code 124, and there
+  is no automatic retry — a failed run is retried only when the next trigger fires.
+
 ## Distillation Resilience
 
 Concretion (event → principle) runs against imperfect model output, so its failure
@@ -307,7 +321,10 @@ Two consequences worth preserving when extending it:
 - **Script coverage** — tokenization accepts any Unicode letter or digit as a word
   and keeps CJK bigrams, so retrieval and the near-duplicate gate work for
   non-Latin languages instead of silently dropping their tokens. ASCII-only suffix
-  folding is applied only to ASCII words.
+  folding is applied only to ASCII words. Matching stays *lexical*: a pure
+  translation of an English principle into Chinese shares no tokens and is not
+  detected — only mixed text sharing terms (identifiers, product names, technical
+  vocabulary) matches across languages.
 - **No domain vocabulary in code or prompts** — examples in tool descriptions use
   neutral identifiers (`abc-123`, `owner/repo`), never a specific product's keys.
 

@@ -707,8 +707,16 @@ function relevantPrincipleIdsForCandidate(
   return uniqueIds.filter((id) => allowed.has(id));
 }
 
-/** Jaccard similarity at or above this is "the same rule stated twice". */
+/** Jaccard similarity at or above this is "the same rule stated twice": absorb. */
 const PRINCIPLE_NEAR_DUPLICATE_THRESHOLD = 0.85;
+/**
+ * Below the absorb threshold but above this, a "new" principle is usually the same
+ * rule reworded (added clause, different word order). Silently adding it produces
+ * two competing copies in the prompt; absorbing it silently loses the nuance. So
+ * this band parks the candidate in the conflict queue as a possible restatement,
+ * where one click merges or keeps both. Observed echoes land here (0.6-0.8).
+ */
+const PRINCIPLE_POSSIBLE_RESTATEMENT_THRESHOLD = 0.65;
 
 /** Record one cold recall per principle (batched). Failures never break search. */
 export function recordPrincipleHits(dbManager: DatabaseManager, ids: number[]): void {
@@ -780,22 +788,25 @@ export function principleStrength(principle: AdaptivePrinciple, now: Date = new 
 /** Highest-scoring active principle in the same scope that restates `content`. */
 function findNearDuplicatePrinciple(
   db: ReturnType<DatabaseManager["getDb"]>,
-  input: { scope: EventScope; project: string | null; content: string },
-): number | null {
+  input: { scope: EventScope; project: string | null; content: string; excludeIds?: number[] },
+  threshold: number = PRINCIPLE_NEAR_DUPLICATE_THRESHOLD,
+): { id: number; similarity: number } | null {
   const rows = db.prepare(`
     SELECT id, content FROM principles
     WHERE status = 'active' AND scope = ? AND IFNULL(project, '') = IFNULL(?, '')
   `).all(input.scope, input.project) as Array<{ id: number; content: string }>;
-  let bestId: number | null = null;
-  let bestScore = PRINCIPLE_NEAR_DUPLICATE_THRESHOLD;
+  const excluded = new Set(input.excludeIds ?? []);
+  let best: { id: number; similarity: number } | null = null;
   for (const row of rows) {
+    // A refine/merge is BY DESIGN close to the principles it replaces; the
+    // restatement guard must only look at principles that stay active.
+    if (excluded.has(row.id)) continue;
     const score = tokenSetSimilarity(row.content, input.content);
-    if (score >= bestScore) {
-      bestScore = score;
-      bestId = row.id;
+    if (score >= threshold && (!best || score > best.similarity)) {
+      best = { id: row.id, similarity: score };
     }
   }
-  return bestId;
+  return best;
 }
 
 function addPrincipleInTransaction(
@@ -809,7 +820,15 @@ function addPrincipleInTransaction(
     supersedesIds?: number[];
   },
   charLimit: number,
-): { principleId?: number; duplicateId?: number; overCapacity?: boolean; error?: string } {
+): {
+  principleId?: number;
+  duplicateId?: number;
+  /** Set when the text looks like a reworded copy of this active principle. */
+  restatementOf?: number;
+  restatementSimilarity?: number;
+  overCapacity?: boolean;
+  error?: string;
+} {
   const content = input.content.trim();
   const rationale = cleanNullable(input.rationale);
   const project = input.scope === "project" ? cleanNullable(input.project) : null;
@@ -818,6 +837,7 @@ function addPrincipleInTransaction(
   }
   const blocked = scanContent(content) ?? (rationale ? scanContent(rationale) : null);
   if (blocked) return { error: blocked };
+  const supersedesIds = [...new Set(input.supersedesIds ?? [])];
 
   const duplicate = db.prepare(`
     SELECT id FROM principles
@@ -833,13 +853,23 @@ function addPrincipleInTransaction(
   // reinforces the existing trace (same evidence, stronger standing) instead of
   // minting a near-duplicate row. Conservative on purpose: only near-identical
   // wording is absorbed, so genuinely different rules still get their own line.
-  const nearDuplicate = findNearDuplicatePrinciple(db, { scope: input.scope, project, content });
+  const nearDuplicate = findNearDuplicatePrinciple(db, { scope: input.scope, project, content, excludeIds: supersedesIds });
   if (nearDuplicate) {
-    linkPrincipleSources(db, nearDuplicate, input.sourceEventIds);
-    return { duplicateId: nearDuplicate };
+    linkPrincipleSources(db, nearDuplicate.id, input.sourceEventIds);
+    return { duplicateId: nearDuplicate.id };
   }
 
-  const supersedesIds = [...new Set(input.supersedesIds ?? [])];
+  // Possible restatement: do not add a second copy and do not silently merge a
+  // rule that may carry new nuance — park it for a human decision instead.
+  const possibleRestatement = findNearDuplicatePrinciple(
+    db,
+    { scope: input.scope, project, content, excludeIds: supersedesIds },
+    PRINCIPLE_POSSIBLE_RESTATEMENT_THRESHOLD,
+  );
+  if (possibleRestatement) {
+    return { restatementOf: possibleRestatement.id, restatementSimilarity: possibleRestatement.similarity };
+  }
+
   if (activePrinciplePayloadChars(db, { scope: input.scope, project, content, supersedesIds }) > charLimit) {
     return { overCapacity: true };
   }
@@ -868,6 +898,27 @@ function addPrincipleInTransaction(
   return { principleId };
 }
 
+/**
+ * A project-scoped candidate with no project can never be accepted (the write path
+ * rejects project scope without a project), so parking it unchanged creates a
+ * permanent dead end for the user. Normalize on the way in: adopt the single
+ * project its source events agree on, otherwise fall back to global scope.
+ */
+function normalizeConflictScope(
+  db: ReturnType<DatabaseManager["getDb"]>,
+  scope: EventScope,
+  project: string | null,
+  sourceEventIds: number[],
+): { scope: EventScope; project: string | null } {
+  if (scope !== "project" || project) return { scope, project };
+  const ids = [...new Set(sourceEventIds)];
+  if (ids.length === 0) return { scope: "global", project: null };
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = db.prepare(`SELECT DISTINCT project FROM memory_events WHERE id IN (${placeholders}) AND project IS NOT NULL`)
+    .all(...ids) as Array<{ project: string }>;
+  return rows.length === 1 ? { scope: "project", project: rows[0]!.project } : { scope: "global", project: null };
+}
+
 function recordConflictInTransaction(
   db: ReturnType<DatabaseManager["getDb"]>,
   input: {
@@ -880,6 +931,8 @@ function recordConflictInTransaction(
     reason: string;
   },
 ): number {
+  const normalized = normalizeConflictScope(db, input.scope, input.project, input.sourceEventIds);
+  input = { ...input, scope: normalized.scope, project: normalized.project };
   const idsJson = JSON.stringify([...new Set(input.conflictingPrincipleIds)].sort((a, b) => a - b));
   const sourceJson = JSON.stringify([...new Set(input.sourceEventIds)].sort((a, b) => a - b));
   const existing = db.prepare(`
@@ -1124,6 +1177,18 @@ export function applyConcretionPlan(
           reason: `Candidate requires review before activation: ${added.error}`,
         });
         result.conflicts++;
+      } else if (added.restatementOf) {
+        recordConflictInTransaction(db, {
+          scope,
+          project,
+          content,
+          rationale,
+          conflictingPrincipleIds: [...relevantExistingIds, added.restatementOf],
+          sourceEventIds,
+          reason: `Possible restatement of P${added.restatementOf}`
+            + ` (similarity ${added.restatementSimilarity?.toFixed(2)}): merge it into that principle or keep both.`,
+        });
+        result.conflicts++;
       } else if (added.overCapacity) {
         recordConflictInTransaction(db, {
           scope,
@@ -1251,11 +1316,17 @@ export function resolvePrincipleConflict(
     return { success: true, message: `Rejected candidate from conflict ${conflictId}; existing principles remain active.` };
   }
 
+  const normalizedScope = normalizeConflictScope(
+    db,
+    conflict.candidateScope,
+    conflict.candidateProject,
+    conflict.sourceEventIds,
+  );
   let outcome: ReturnType<typeof addPrincipleInTransaction> = {};
   const apply = () => {
     outcome = addPrincipleInTransaction(db, {
-      scope: conflict.candidateScope,
-      project: conflict.candidateProject,
+      scope: normalizedScope.scope,
+      project: normalizedScope.project,
       content: conflict.candidateContent,
       rationale: conflict.candidateRationale,
       sourceEventIds: conflict.sourceEventIds,
@@ -1263,8 +1334,8 @@ export function resolvePrincipleConflict(
         ? relevantPrincipleIdsForCandidate(
           db,
           conflict.conflictingPrincipleIds,
-          conflict.candidateScope,
-          conflict.candidateProject,
+          normalizedScope.scope,
+          normalizedScope.project,
         )
         : [],
     }, charLimit);
@@ -1284,6 +1355,14 @@ export function resolvePrincipleConflict(
   const transaction = db.transaction?.(apply);
   if (transaction) transaction();
   else apply();
+  if (outcome.restatementOf) {
+    return {
+      success: false,
+      message: `This candidate looks like a restatement of P${outcome.restatementOf}`
+        + ` (similarity ${outcome.restatementSimilarity?.toFixed(2)}). Merge it with /memory-concretize,`
+        + " or keep it separate by accepting it as a distinct principle.",
+    };
+  }
   if (outcome.overCapacity) {
     return {
       success: false,
