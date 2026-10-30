@@ -656,7 +656,11 @@ describe("event-memory-store", () => {
     const generous = renderAdaptivePrinciples(dbManager, "demo", false, 20000);
     const firstLine = generous.split("\n").find((line) => line.startsWith("1. ["))!;
     const headerChars = generous.slice(0, generous.indexOf(firstLine)).length + "</adaptive-principles>".length + 1;
-    const oneLineBudget = headerChars + firstLine.length + 5;
+    // The renderer reserves space for the omission note, so include that reserve
+    // when deriving a budget that fits exactly one principle line.
+    const tiny = renderAdaptivePrinciples(dbManager, "demo", false, 1);
+    const noteLine = tiny.split("\n").find((line) => line.includes("are not shown"))!;
+    const oneLineBudget = headerChars + noteLine.length + 1 + firstLine.length + 5;
     const rendered = renderAdaptivePrinciples(dbManager, "demo", false, oneLineBudget);
     assert.match(rendered, /\[P\d+\/project\]/, "project-scoped principle must be shown first");
     assert.match(rendered, /1 of 2 active principles are not shown/, "omission count must be stated");
