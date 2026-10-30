@@ -893,8 +893,13 @@ describe('DatabaseManager', () => {
         messages: 50,
         session_files: 0,
         memories: 1,
+        concretion_runs: 0,
+        memory_events: 0,
+        principles: 0,
+        principle_sources: 0,
+        principle_conflicts: 0,
       });
-      assert.deepStrictEqual(dbManager.getStats(), { sessions: 1, messages: 50, memories: 1 });
+      assert.deepStrictEqual(dbManager.getStats(), { sessions: 1, messages: 50, memories: 1, events: 0, principles: 0, conflicts: 0 });
       const memory = repairedDb.prepare('SELECT content FROM memories WHERE content = ?').get('recoverable memory') as { content: string } | undefined;
       assert.ok(memory);
       assertQuickCheckOk(repairedDb as InstanceType<typeof Database>);
@@ -916,7 +921,7 @@ describe('DatabaseManager', () => {
       const recoveredDb = dbManager.getDb();
 
       assert.strictEqual(dbManager.getLastRecovery()?.strategy, 'rebuilt');
-      assert.deepStrictEqual(dbManager.getStats(), { sessions: 1, messages: 0, memories: 0 });
+      assert.deepStrictEqual(dbManager.getStats(), { sessions: 1, messages: 0, memories: 0, events: 0, principles: 0, conflicts: 0 });
       assertQuickCheckOk(recoveredDb as InstanceType<typeof Database>);
       assert.ok(fs.readdirSync(tmpDir).some((name) => name.startsWith('sessions.db.corrupt-')), 'corrupt DB should be quarantined');
     });
@@ -959,7 +964,7 @@ describe('DatabaseManager', () => {
       const db = dbManager.getDb();
 
       assert.strictEqual(dbManager.getLastRecovery()?.strategy, 'recreated-empty');
-      assert.deepStrictEqual(dbManager.getStats(), { sessions: 0, messages: 0, memories: 0 });
+      assert.deepStrictEqual(dbManager.getStats(), { sessions: 0, messages: 0, memories: 0, events: 0, principles: 0, conflicts: 0 });
       assertQuickCheckOk(db as InstanceType<typeof Database>);
       assert.ok(fs.readdirSync(tmpDir).some((name) => name.startsWith('sessions.db.corrupt-')), 'unrecoverable DB should be quarantined');
     });

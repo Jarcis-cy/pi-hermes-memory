@@ -2,7 +2,7 @@ import { MEMORY_POLICY_PROMPT, MEMORY_POLICY_PROMPT_COMPACT } from "./constants.
 import type { MemoryConfig } from "./types.js";
 import type { MemoryStore } from "./store/memory-store.js";
 import type { DatabaseManager } from "./store/db.js";
-import { renderAdaptivePrinciples } from "./store/event-memory-store.js";
+import { renderAdaptivePrinciples, renderAdaptivePrinciplesFromSnapshot } from "./store/event-memory-store.js";
 import type { StandingInstructions } from "./store/standing-instructions.js";
 
 type MemoryPolicyConfig = Pick<MemoryConfig, "memoryPolicyStyle" | "memoryPolicyCustomText">;
@@ -41,14 +41,25 @@ export async function buildPromptContext(
   forChild = false,
   dbManager: DatabaseManager | null = null,
   principleInjectionEnabled = true,
+  principlesDir: string | null = null,
 ): Promise<string> {
   const standingBlock = standing?.formatForSystemPrompt() ?? "";
   let principleBlock = "";
-  if (principleInjectionEnabled && dbManager) {
-    try {
-      principleBlock = renderAdaptivePrinciples(dbManager, projectName || null);
-    } catch {
-      // Persistent-memory availability must not block an otherwise healthy agent run.
+  if (principleInjectionEnabled && !forChild) {
+    if (dbManager) {
+      try {
+        principleBlock = renderAdaptivePrinciples(dbManager, projectName || null);
+      } catch {
+        // Persistent-memory availability must not block an otherwise healthy agent run.
+      }
+    } else if (principlesDir) {
+      // Lazy sessions render from the file snapshot so generic conversation
+      // never opens SQLite just to build the prompt.
+      try {
+        principleBlock = await renderAdaptivePrinciplesFromSnapshot(principlesDir, projectName || null);
+      } catch {
+        // Snapshot is best-effort; absence just means no principles this run.
+      }
     }
   }
 

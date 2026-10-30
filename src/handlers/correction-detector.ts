@@ -157,7 +157,7 @@ export function setupCorrectionDetector(
       return;
     }
     if (correctionInProgress) return;
-    const correctionText = pendingCorrection;
+    const detectedCorrection = pendingCorrection;
     pendingCorrection = undefined;
 
     // Rate limit: max 1 correction save per 3 turns
@@ -171,7 +171,7 @@ export function setupCorrectionDetector(
       } catch {
         // Keep the correction eligible for the next turn after a transient load
         // failure, without consuming the successful-capture rate limit.
-        pendingCorrection ??= correctionText;
+        pendingCorrection ??= detectedCorrection;
         return;
       }
       turnsSinceLastCorrection = 0;
@@ -203,7 +203,7 @@ export function setupCorrectionDetector(
       }
       const correctionText = lastUserMsg
         ? lastUserMsg.replace(/^\[USER\]:\s*/, "")
-        : detectedCorrectionText;
+        : detectedCorrection;
       const directive = correctionText ? extractCorrectionDirective(correctionText) : "";
 
       if (config.eventMemoryEnabled !== false && dbManager && correctionText) {

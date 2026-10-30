@@ -459,8 +459,9 @@ export function extractPayloadWithArrayKeys(
 ): Record<string, unknown> | null {
   const carriesKey = (value: unknown): Record<string, unknown> | null => {
     if (!isJsonObjectPayload(value)) return null;
+    const record = value as Record<string, unknown>;
     for (const key of keys) {
-      if (Array.isArray(value[key])) return value as Record<string, unknown>;
+      if (Array.isArray(record[key])) return record;
     }
     return null;
   };
@@ -839,7 +840,7 @@ export async function runDirectJsonCompletion(
   const model = resolveReviewModel(ctx.model, ctx.modelRegistry, options.config);
   if (!model) return { ok: false, text: "", fallbackReason: "no_model" };
 
-  const auth = await resolveFreshRequestAuth(ctx.modelRegistry, model);
+  const auth = await resolveRequestAuth(ctx.modelRegistry, model);
   if (!auth.ok || !auth.apiKey) {
     return {
       ok: false,
@@ -849,7 +850,7 @@ export async function runDirectJsonCompletion(
     };
   }
 
-  let requestAuth = { apiKey: auth.apiKey, headers: auth.headers, env: auth.env };
+  let requestAuth: DirectReviewAuth = { apiKey: auth.apiKey, headers: auth.headers, env: auth.env };
   const controller = new AbortController();
   const timeoutMs = options.timeoutMs ?? 120000;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -870,18 +871,18 @@ export async function runDirectJsonCompletion(
       response = await complete(
         model,
         request,
-        buildDirectReviewCompletionOptions(model, requestAuth, thinking, controller.signal),
+        buildDirectReviewCompletionOptions(model, requestAuth, thinking, controller.signal, undefined),
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (controller.signal.aborted || !isAuthRejection(message)) throw error;
-      const rotated = await resolveFreshRequestAuth(ctx.modelRegistry, model);
+      const rotated = await resolveRequestAuth(ctx.modelRegistry, model);
       if (!rotated.ok || !rotated.apiKey || rotated.apiKey === requestAuth.apiKey) throw error;
       requestAuth = { apiKey: rotated.apiKey, headers: rotated.headers, env: rotated.env };
       response = await complete(
         model,
         request,
-        buildDirectReviewCompletionOptions(model, requestAuth, thinking, controller.signal),
+        buildDirectReviewCompletionOptions(model, requestAuth, thinking, controller.signal, undefined),
       );
     }
 

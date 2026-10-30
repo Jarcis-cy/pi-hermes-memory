@@ -1382,7 +1382,12 @@ export class DatabaseManager {
       this.db = null;
     }
     this.pendingOpenIntegrityScan = null;
-    AtomicLockCoordinator.closeShared(path.join(path.dirname(this.dbPath), '.pi-hermes-locks.sqlite'));
+    try {
+      AtomicLockCoordinator.closeShared(path.join(path.dirname(this.dbPath), '.pi-hermes-locks.sqlite'));
+    } catch {
+      // Unresolvable storage path (e.g. symlink loop test fixture): no lock
+      // file can be located, so there is nothing to release.
+    }
   }
 
   /**
