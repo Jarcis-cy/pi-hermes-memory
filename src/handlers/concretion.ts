@@ -16,7 +16,7 @@ import {
   type ConcretionTrigger,
   type EventScope,
 } from "../store/event-memory-store.js";
-import { DEFAULT_PRINCIPLE_CHAR_LIMIT, PRINCIPLES_FILE } from "../constants.js";
+import { DEFAULT_PRINCIPLE_CHAR_LIMIT, DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT, PRINCIPLES_FILE } from "../constants.js";
 import type { MemoryConfig } from "../types.js";
 import { execChildPrompt } from "./pi-child-process.js";
 import {
@@ -242,6 +242,7 @@ export async function runConcretion(
 
     runId = startConcretionRun(dbManager, trigger, lockedEvents.length);
     const principleCharLimit = config.principleCharLimit ?? DEFAULT_PRINCIPLE_CHAR_LIMIT;
+    const storeCharLimit = config.principleStoreCharLimit ?? DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT;
     const userPrompt = buildConcretionUserPrompt(
       lockedEvents,
       completePrinciples,
@@ -306,7 +307,7 @@ export async function runConcretion(
       .filter((candidate) => candidate.action === "none" || candidate.sourceEventIds.length > 0);
 
     const applied = applyConcretionPlan(dbManager, runId, lockedEvents, candidates, {
-      charLimit: config.principleCharLimit ?? DEFAULT_PRINCIPLE_CHAR_LIMIT,
+      charLimit: storeCharLimit,
     });
     await writePrinciplesSnapshot(dbManager, path.join(globalDir, PRINCIPLES_FILE), principleCharLimit);
     return {

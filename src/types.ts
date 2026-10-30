@@ -143,9 +143,15 @@ export interface MemoryConfig {
   concretionReviewThreshold?: number;
   /** Maximum pending events considered in one concretion run. Default: 100 */
   concretionEventBatchSize?: number;
-  /** Maximum characters across active adaptive principles. Default: 20000
-   * (roughly 5000 tokens for English-heavy principles); set 40000 for roughly 10000 tokens. */
+  /** Maximum characters INJECTED per run — the working set. Default: 20000
+   * (roughly 5000 tokens for English-heavy principles). Principles beyond it are
+   * omitted from the prompt but listed in the discoverability index and remain
+   * recallable, so this is an attention budget, not a storage cap. */
   principleCharLimit?: number;
+  /** Maximum characters the principle layer may HOLD. Default: 48000. Keeping
+   * this above `principleCharLimit` is what stops a curated layer from deadlocking:
+   * a store larger than the injection budget is normal once omission exists. */
+  principleStoreCharLimit?: number;
   /** Inject accepted adaptive principles into every agent run. Default: true */
   principleInjectionEnabled?: boolean;
 }
