@@ -14,7 +14,7 @@ export function deriveEventEntities(...texts: Array<string | null | undefined>):
     if (tag.length >= 2 && tag.length <= 120) found.add(tag);
   };
 
-  // Tickets: IAR-1839, GD-1, SEC-42 (uppercase project key + digits).
+  // Tickets: an uppercase project key plus digits (ABC-123, OPS-7).
   for (const match of joined.matchAll(/\b([A-Z][A-Z0-9]{1,9}-\d{1,6})\b/g)) add(match[1]!);
   // Repo/package slugs and relative paths: owner/repo, pkg/sub, a.b/c.d.
   for (const match of joined.matchAll(/(?:^|[\s(\[`"'])([\w.-]+\/[\w./-]{2,})/g)) add(match[1]!);

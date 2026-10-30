@@ -58,7 +58,7 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
       project: Type.Optional(Type.String({ description: 'Filter by project name. Pass null for global memories only.' })),
       target: Type.Optional(StringEnum(['memory', 'user', 'failure', 'project'] as const, { description: 'Filter by target type: memory, user, failure, or project-attributed memories.' })),
       category: Type.Optional(StringEnum(['failure', 'correction', 'insight', 'preference', 'convention', 'tool-quirk'] as const, { description: 'Filter by memory category.' })),
-      entity: Type.Optional(Type.String({ description: 'Facet filter: one entity tag (ticket id, repo slug, path) derived from the event ledger, e.g. iar-1839.' })),
+      entity: Type.Optional(Type.String({ description: 'Facet filter: one entity tag (ticket id, repo slug, path) derived from the event ledger, lowercase, e.g. abc-123 or owner/repo.' })),
       limit: Type.Optional(Type.Number({ description: 'Maximum results to return (default: 10, max: 20).' })),
     }),
     execute: async (_id: string, args: { query: string; project?: string; target?: 'memory' | 'user' | 'failure' | 'project'; category?: string; entity?: string; limit?: number }) => {

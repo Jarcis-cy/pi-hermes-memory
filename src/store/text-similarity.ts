@@ -17,6 +17,13 @@
 const MIN_WORD_LENGTH = 3;
 /** CJK runs are tokenized as overlapping bigrams: 窗口索引 -> 窗口, 口索, 索引. */
 const CJK_RANGE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+/** Any Unicode letter or digit forms a word — Latin, Cyrillic, Greek, Arabic,
+ * Hebrew, Devanagari, Thai, and everything else. Restricting this to ASCII would
+ * silently drop every token of a non-Latin, non-CJK language from both retrieval
+ * and the near-duplicate gate. */
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+/** Suffix folding only makes sense for plain ASCII words. */
+const ASCII_WORD = /^[a-z]+$/;
 
 /**
  * Minimal, deterministic suffix folding so that a query and a principle meet on
@@ -64,7 +71,7 @@ export function tokenizeForMatch(text: string): string[] {
   let cjkRun = "";
 
   const flushWord = () => {
-    if (word.length >= MIN_WORD_LENGTH) tokens.push(stemWord(word));
+    if (word.length >= MIN_WORD_LENGTH) tokens.push(ASCII_WORD.test(word) ? stemWord(word) : word);
     word = "";
   };
   const flushCjk = () => {
@@ -83,7 +90,7 @@ export function tokenizeForMatch(text: string): string[] {
       continue;
     }
     flushCjk();
-    if ((char >= "a" && char <= "z") || (char >= "0" && char <= "9")) {
+    if (WORD_CHAR.test(char)) {
       word += char;
       continue;
     }
