@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { DatabaseManager } from "./db.js";
 import { deriveEventEntities } from "./event-entities.js";
+import { queryCoverage, tokenSetSimilarity } from "./text-similarity.js";
 import { DEFAULT_PRINCIPLE_CHAR_LIMIT } from "../constants.js";
 
 export { deriveEventEntities } from "./event-entities.js";
@@ -585,6 +586,44 @@ export function getActivePrinciples(dbManager: DatabaseManager, project?: string
   return rows.map((row) => mapPrincipleRow(row, sources.get(Number(row.id)) ?? []));
 }
 
+/**
+ * Lexical recall over the active principle layer.
+ *
+ * Principles are normally injected; this is the cold path that keeps a principle
+ * reachable after it falls out of the injection budget (or when the run simply
+ * cannot feel it). Lexical coverage, not BM25, because the layer is small
+ * (hundreds at most) and has no FTS index — a full scan over the scoped view is
+ * cheaper than a migration and keeps this deterministic.
+ *
+ * Contract: returns active principles of the requested scope only (global+user,
+ * or one project), ranked by query coverage then recency; an empty/whitespace
+ * query yields nothing (a blank query is not a recall cue).
+ */
+export function searchPrinciples(
+  dbManager: DatabaseManager,
+  query: string,
+  options: { project?: string | null; scope?: EventScope; limit?: number } = {},
+): Array<{ principle: AdaptivePrinciple; score: number }> {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+  const limit = Math.max(1, Math.min(options.limit ?? 5, 20));
+  const project = options.project ?? null;
+  const candidates = options.scope === "user"
+    ? getActivePrinciples(dbManager, null).filter((principle) => principle.scope === "user")
+    : options.scope === "project"
+      ? getActivePrinciples(dbManager, project).filter((principle) => principle.scope === "project" && principle.project === project)
+      : options.scope === "global"
+        ? getActivePrinciples(dbManager, null).filter((principle) => principle.scope === "global")
+        : getActivePrinciples(dbManager, project);
+
+  const scored = candidates
+    .map((principle) => ({ principle, score: queryCoverage(trimmed, principle.content) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => (b.score !== a.score ? b.score - a.score : b.principle.id - a.principle.id));
+  return scored.slice(0, limit);
+}
+
+
 export function getAllActivePrinciples(dbManager: DatabaseManager): AdaptivePrinciple[] {
   const rows = dbManager.getDb().prepare(`
     SELECT * FROM principles
@@ -649,6 +688,30 @@ function relevantPrincipleIdsForCandidate(
   return uniqueIds.filter((id) => allowed.has(id));
 }
 
+/** Jaccard similarity at or above this is "the same rule stated twice". */
+const PRINCIPLE_NEAR_DUPLICATE_THRESHOLD = 0.85;
+
+/** Highest-scoring active principle in the same scope that restates `content`. */
+function findNearDuplicatePrinciple(
+  db: ReturnType<DatabaseManager["getDb"]>,
+  input: { scope: EventScope; project: string | null; content: string },
+): number | null {
+  const rows = db.prepare(`
+    SELECT id, content FROM principles
+    WHERE status = 'active' AND scope = ? AND IFNULL(project, '') = IFNULL(?, '')
+  `).all(input.scope, input.project) as Array<{ id: number; content: string }>;
+  let bestId: number | null = null;
+  let bestScore = PRINCIPLE_NEAR_DUPLICATE_THRESHOLD;
+  for (const row of rows) {
+    const score = tokenSetSimilarity(row.content, input.content);
+    if (score >= bestScore) {
+      bestScore = score;
+      bestId = row.id;
+    }
+  }
+  return bestId;
+}
+
 function addPrincipleInTransaction(
   db: ReturnType<DatabaseManager["getDb"]>,
   input: {
@@ -678,6 +741,16 @@ function addPrincipleInTransaction(
   if (duplicate) {
     linkPrincipleSources(db, duplicate.id, input.sourceEventIds);
     return { duplicateId: duplicate.id };
+  }
+
+  // Encoding gate: a near-identical restatement is not a new occasion — it
+  // reinforces the existing trace (same evidence, stronger standing) instead of
+  // minting a near-duplicate row. Conservative on purpose: only near-identical
+  // wording is absorbed, so genuinely different rules still get their own line.
+  const nearDuplicate = findNearDuplicatePrinciple(db, { scope: input.scope, project, content });
+  if (nearDuplicate) {
+    linkPrincipleSources(db, nearDuplicate, input.sourceEventIds);
+    return { duplicateId: nearDuplicate };
   }
 
   const supersedesIds = [...new Set(input.supersedesIds ?? [])];

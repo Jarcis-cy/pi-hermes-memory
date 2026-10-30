@@ -218,4 +218,35 @@ describe('registerMemorySearchTool', () => {
 
     dbManager.close();
   });
+  it("returns principles that were not injected, labeled with their id and scope", async () => {
+    const dbManager = makeDbManager();
+    const captured = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "failure",
+      content: "Wiring silently defaulted to the wrong field.",
+    }], { captureId: "tool-principle", source: "manual" });
+    const { applyConcretionPlan, startConcretionRun, getMemoryEvents } = await import("../../src/store/event-memory-store.js");
+    const run = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Verify the consumer's expected field path before wiring a new adapter boundary.",
+      rationale: "Wiring silently defaulted.",
+      sourceEventIds: captured.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+
+    let capturedTool: any;
+    registerMemorySearchTool({ registerTool: (def: any) => { capturedTool = def; } } as any, dbManager);
+
+    const hit = await capturedTool.execute("tc-principle", { query: "consumer field path adapter boundary" });
+    assert.match(hit.content[0].text, /📐 P\d+ \[global\]/);
+    assert.match(hit.content[0].text, /Adaptation principle/);
+
+    // 分类过滤只描述记忆/事件库，原则不参与
+    const categorized = await capturedTool.execute("tc-principle-cat", { query: "consumer field path", category: "failure" });
+    assert.doesNotMatch(categorized.content[0].text, /Adaptation principle/);
+
+    dbManager.close();
+  });
 });
