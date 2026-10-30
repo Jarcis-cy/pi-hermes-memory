@@ -28,6 +28,7 @@ export interface BackgroundReviewOptions {
   ensureMemoryReady?: EnsureMemoryReady;
   dbManager?: DatabaseManager | null;
   projectName?: ProjectNameRef;
+  globalDir?: string;
   deps?: BackgroundReviewDeps;
 }
 

@@ -317,8 +317,11 @@ export default function (pi: ExtensionAPI) {
       projectNameRef(),
       standingStore,
       isMemoryChildProcess(),
-      dbManager,
+      // Lazy sessions must not open SQLite just to render principles; the
+      // snapshot file keeps them injectable without a DB round-trip.
+      lazy ? null : dbManager,
       config.principleInjectionEnabled !== false,
+      lazy ? globalDir : null,
     );
     if (!promptContext) return;
 

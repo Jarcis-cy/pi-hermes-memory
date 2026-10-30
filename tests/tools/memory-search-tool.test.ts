@@ -158,19 +158,28 @@ describe('registerMemorySearchTool', () => {
     const dbManager = makeDbManager();
     addMemory(dbManager, 'resilient entry', 'memory');
 
-    let getDbCalls = 0;
     const realGetDb = dbManager.getDb.bind(dbManager);
     const flaky = Object.create(dbManager) as DatabaseManager;
+    // Fail only the hit-count UPDATE: the read path (stats, extended store,
+    // episodic events) must stay healthy so the search itself succeeds.
     flaky.getDb = () => {
-      getDbCalls++;
-      if (getDbCalls > 2) throw new Error('injected recording failure');
-      return realGetDb();
+      const db = realGetDb();
+      return new Proxy(db, {
+        get(target, prop, receiver) {
+          if (prop === 'prepare') {
+            return (sql: string) => {
+              if (/hit_count/i.test(sql)) throw new Error('injected recording failure');
+              return (target as any).prepare(sql);
+            };
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      }) as typeof db;
     };
 
     let captured: any;
     registerMemorySearchTool({ registerTool: (def: any) => { captured = def; } } as any, flaky);
 
-    // getDb calls: getMemoryStats(1) + searchMemories(1) + recordSearchHits(1, throws).
     const result = await captured.execute('tc-1', { query: 'resilient' });
     assert.strictEqual(result.details.success, true);
     assert.strictEqual(result.details.count, 1);

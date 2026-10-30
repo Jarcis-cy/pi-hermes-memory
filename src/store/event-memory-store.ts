@@ -1013,9 +1013,88 @@ export function renderAdaptivePrinciples(
   return blocks.join("\n\n");
 }
 
+/** Injection-format snapshot (JSON) written beside PRINCIPLES.md so lazy
+ * sessions can render principles without opening SQLite. */
+export const PRINCIPLES_INJECTION_FILE = ".principles-injection.json";
+
+interface InjectionPrinciple { id: number; scope: string; project: string | null; content: string; }
+interface InjectionConflict { id: number; candidateContent: string; reason: string | null; }
+
+async function writePrinciplesInjectionSnapshot(
+  principles: AdaptivePrinciple[],
+  conflicts: PrincipleConflict[],
+  filePath: string,
+): Promise<void> {
+  const payload = {
+    principles: principles.map((principle): InjectionPrinciple => ({
+      id: principle.id,
+      scope: principle.scope,
+      project: principle.project ?? null,
+      content: principle.content,
+    })),
+    conflicts: conflicts.slice(0, 3).map((conflict): InjectionConflict => ({
+      id: conflict.id,
+      candidateContent: truncateForPrompt(conflict.candidateContent, 500),
+      reason: conflict.reason ? truncateForPrompt(conflict.reason, 300) : null,
+    })),
+  };
+  try {
+    const tmp = `${filePath}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(payload), "utf8");
+    await fs.rename(tmp, filePath);
+  } catch {
+    // Snapshot is an optimization for lazy sessions; failure is non-fatal.
+  }
+}
+
+/** Render the same adaptive-principles / memory-conflicts prompt blocks as
+ * renderAdaptivePrinciples, but from the file snapshot (no SQLite open). */
+export async function renderAdaptivePrinciplesFromSnapshot(
+  dir: string,
+  project?: string | null,
+): Promise<string> {
+  let payload: { principles?: InjectionPrinciple[]; conflicts?: InjectionConflict[] };
+  try {
+    payload = JSON.parse(await fs.readFile(path.join(dir, PRINCIPLES_INJECTION_FILE), "utf8")) as typeof payload;
+  } catch {
+    return "";
+  }
+  const scoped = (payload.principles ?? []).filter((principle) =>
+    principle.scope === "global"
+    || principle.scope === "user"
+    || (principle.scope === "project" && project != null && principle.project === project),
+  );
+  const blocks: string[] = [];
+  if (scoped.length) {
+    blocks.push([
+      "<adaptive-principles>",
+      "These are generalized lessons distilled from prior events. Apply them as fallible",
+      "behavioral defaults. Current user instructions and current evidence override them.",
+      "Do not claim to remember a source event unless you retrieve it with memory_search.",
+      "",
+      ...scoped.map((principle, index) => `${index + 1}. [P${principle.id}/${principle.scope}] ${principle.content}`),
+      "</adaptive-principles>",
+    ].join("\n"));
+  }
+  const conflicts = payload.conflicts ?? [];
+  if (conflicts.length) {
+    blocks.push([
+      "<memory-conflicts>",
+      "The candidates below conflict with active adaptive principles and are NOT active.",
+      "Ask the user to resolve them; do not choose or silently merge them.",
+      "Use /memory-conflicts to show both sides and source-event evidence before deciding.",
+      "",
+      ...conflicts.map((conflict) => `- Conflict ${conflict.id}: ${conflict.candidateContent} (reason: ${conflict.reason ?? "unspecified"})`),
+      "</memory-conflicts>",
+    ].join("\n"));
+  }
+  return blocks.join("\n\n");
+}
+
 export async function writePrinciplesSnapshot(dbManager: DatabaseManager, filePath: string): Promise<void> {
   const principles = getAllActivePrinciples(dbManager);
   const conflicts = getPendingPrincipleConflicts(dbManager, 100);
+  await writePrinciplesInjectionSnapshot(principles, conflicts, path.join(path.dirname(filePath), PRINCIPLES_INJECTION_FILE));
   const lines = [
     "# Adaptive Principles",
     "",

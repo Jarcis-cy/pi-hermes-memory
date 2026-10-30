@@ -128,6 +128,7 @@ describe("buildPromptContext", () => {
       projectStore,
       "demo",
       standing,
+      false,
       failingDbManager,
     );
 
