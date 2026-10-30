@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { deriveEventEntities } from "./event-entities.js";
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import { SCHEMA_SQL } from './schema.js';
@@ -1178,7 +1179,29 @@ export class DatabaseManager {
     }
     if (!names.has('entities')) {
       db.exec('ALTER TABLE memory_events ADD COLUMN entities TEXT');
+      this.backfillMemoryEventEntities(db);
     }
+  }
+
+  /** One-time facet backfill: rows captured before the entities column existed
+   * get their deterministic tags derived here, so the facet filter covers the
+   * whole ledger, not just events captured after the upgrade. */
+  private backfillMemoryEventEntities(db: DatabaseLike): void {
+    const rows = db.prepare(
+      "SELECT id, content, evidence_quote FROM memory_events WHERE entities IS NULL",
+    ).all() as Array<{ id: number | bigint; content: string | null; evidence_quote: string | null }>;
+    if (rows.length === 0) return;
+    const update = db.prepare("UPDATE memory_events SET entities = ? WHERE id = ?");
+    const write = () => {
+      for (const row of rows) {
+        const entities = deriveEventEntities(row.content, row.evidence_quote);
+        if (entities.length === 0) continue;
+        update.run(`|${entities.join("|")}|`, row.id as number);
+      }
+    };
+    const withTransaction = (db as { transaction?: (fn: () => void) => () => void }).transaction;
+    if (typeof withTransaction === "function") withTransaction.call(db, write)();
+    else write();
   }
 
   private ensureSessionsColumns(db: DatabaseLike): void {

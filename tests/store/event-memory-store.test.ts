@@ -582,4 +582,41 @@ describe("event-memory-store", () => {
     assert.equal(signal!.totalHits, 2);
     assert.ok(signal!.lastHitAt);
   });
+  it("backfills facet entities for rows captured before the column existed", () => {
+    const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), "event-memory-facet-backfill-"));
+    try {
+      const legacyManager = new DatabaseManager(legacyDir);
+      const db = legacyManager.getDb();
+      db.exec("DROP TABLE IF EXISTS event_fts");
+      db.exec("DROP TABLE memory_events");
+      db.exec(`CREATE TABLE memory_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        capture_id TEXT NOT NULL, project TEXT, scope TEXT NOT NULL, kind TEXT NOT NULL,
+        content TEXT NOT NULL, evidence_quote TEXT, source TEXT NOT NULL,
+        source_session_id TEXT, occurred_at TEXT NOT NULL, created_at TEXT NOT NULL,
+        concreted_at TEXT, concretion_run_id INTEGER
+      )`);
+      db.prepare(`INSERT INTO memory_events
+        (capture_id, scope, kind, content, evidence_quote, source, occurred_at, created_at)
+        VALUES (?, 'global', 'failure', ?, ?, 'manual', ?, ?)`).run(
+        "legacy-1",
+        "IAR-1839: 窗口索引 prepare 崩溃",
+        "sessions.db migration",
+        "2026-08-01T00:00:00.000Z",
+        "2026-08-01T00:00:00.000Z",
+      );
+      // Keep the external-content FTS index consistent with the recreated
+      // content table, as a real pre-upgrade database would be.
+      db.exec(`CREATE VIRTUAL TABLE event_fts USING fts5(content, evidence_quote, content='memory_events', content_rowid='id')`);
+      db.exec("INSERT INTO event_fts(event_fts) VALUES('rebuild')");
+      legacyManager.close();
+
+      const reopened = new DatabaseManager(legacyDir);
+      const row = reopened.getDb().prepare("SELECT entities FROM memory_events").get() as { entities: string | null };
+      assert.ok(row.entities?.includes("iar-1839"), `expected backfilled facet tags, got ${row.entities}`);
+      reopened.close();
+    } finally {
+      fs.rmSync(legacyDir, { recursive: true, force: true });
+    }
+  });
 });
