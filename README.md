@@ -206,6 +206,28 @@ Manual `memory_add`, `memory_replace`, and `memory_remove` remain available for 
 
 By default, the system prompt contains the memory policy, relevant adaptive principles, and finally user-pinned standing instructions. Standing instructions remain the strongest persistent layer because only the user can write them.
 
+## Retrieval Ranking and Facet Recall
+
+Both stores rank by **relevance first** and use age only as a tiebreaker, so an old
+event that matches the query is never pushed down just because it is old:
+
+- Extended store: FTS5 BM25 relevance, with a bounded recall bonus
+  (`- 0.02 × min(hit_count, 50)`) so frequently recalled entries win near-ties.
+- Episodic ledger: `bm25(event_fts)` with the same bounded recall bonus. Recall
+  counts accrue every time `memory_search` returns an event (`hit_count`,
+  `last_hit_at`), mirroring the extended store.
+- `/memory-insights` shows both stores' usage sections (which entries/events are
+  actually recalled, how often, and when).
+- Concretion prompts include **Principle Usage Signals**: each active principle's
+  source-event recall count and last recall date, so principles whose evidence is
+  never exercised are weaker keep candidates when near-duplicates are merged.
+
+Episodic events also carry a deterministic **facet index** (`entities`): ticket IDs
+(`IAR-1839`), repo/package slugs (`owner/repo`), and dotted/path-like identifiers are
+derived at capture time without an extra LLM call. Filter with
+`memory_search(query, entity: "iar-1839")` to recall by actor instead of by wording.
+The column is added to existing ledgers automatically on open.
+
 ## Standing Instructions
 
 Recall is probabilistic. In `policy-only` mode a stored rule only takes effect if the agent decides to call `memory_search` **before** the action the rule would have prevented — and for a prohibition, that is exactly the moment it has no reason to look. Preferences survive a missed lookup; prohibitions do not.

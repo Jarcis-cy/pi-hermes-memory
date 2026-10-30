@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { DatabaseManager } from '../store/db.js';
 import { searchMemories, getMemoryStats, recordSearchHits } from '../store/sqlite-memory-store.js';
-import { searchMemoryEvents } from '../store/event-memory-store.js';
+import { recordEventHits, searchMemoryEvents } from '../store/event-memory-store.js';
 import type { MemoryCategory } from '../types.js';
 import { createSharedToolResultRenderer } from './shared-output-view.js';
 import { searchResultView } from './tool-result-views.js';
@@ -57,9 +57,10 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
       project: Type.Optional(Type.String({ description: 'Filter by project name. Pass null for global memories only.' })),
       target: Type.Optional(StringEnum(['memory', 'user', 'failure', 'project'] as const, { description: 'Filter by target type: memory, user, failure, or project-attributed memories.' })),
       category: Type.Optional(StringEnum(['failure', 'correction', 'insight', 'preference', 'convention', 'tool-quirk'] as const, { description: 'Filter by memory category.' })),
+      entity: Type.Optional(Type.String({ description: 'Facet filter: one entity tag (ticket id, repo slug, path) derived from the event ledger, e.g. iar-1839.' })),
       limit: Type.Optional(Type.Number({ description: 'Maximum results to return (default: 10, max: 20).' })),
     }),
-    execute: async (_id: string, args: { query: string; project?: string; target?: 'memory' | 'user' | 'failure' | 'project'; category?: string; limit?: number }) => {
+    execute: async (_id: string, args: { query: string; project?: string; target?: 'memory' | 'user' | 'failure' | 'project'; category?: string; entity?: string; limit?: number }) => {
       const query = args.query;
       const project = args.project;
       const target = args.target;
@@ -83,18 +84,14 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
         : target === 'memory'
           ? (project ? 'project' : 'global')
           : undefined;
-      const events = category
-        ? searchMemoryEvents(dbManager, query, {
-          project: project === undefined ? undefined : project,
-          scope: eventScope,
-          kind: category,
-          limit,
-        })
-        : searchMemoryEvents(dbManager, query, {
-          project: project === undefined ? undefined : project,
-          scope: eventScope,
-          limit,
-        });
+      const entity = args.entity?.trim() || undefined;
+      const events = searchMemoryEvents(dbManager, query, {
+        project: project === undefined ? undefined : project,
+        scope: eventScope,
+        ...(category ? { kind: category } : {}),
+        ...(entity ? { entity } : {}),
+        limit,
+      });
       const eventContents = new Set(events.map((event) => event.content));
       const legacyLimit = Math.max(0, limit - events.length);
       const legacy = legacyLimit === 0
@@ -113,9 +110,10 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
       // batched counter UPDATE per search. Must never break the read path.
       // Records hits for extended-store entries; episodic events carry their
       // own tracking on the event ledger.
-      if (options.usageTrackingEnabled !== false && legacy.length > 0) {
+      if (options.usageTrackingEnabled !== false && (legacy.length > 0 || events.length > 0)) {
         try {
-          recordSearchHits(dbManager, legacy.map((entry) => entry.id));
+          if (legacy.length > 0) recordSearchHits(dbManager, legacy.map((entry) => entry.id));
+          if (events.length > 0) recordEventHits(dbManager, events.map((event) => event.id));
         } catch (err) {
           console.warn(`[pi-hermes-memory] usage-hit recording failed (search result unaffected): ${err instanceof Error ? err.message : String(err)}`);
         }

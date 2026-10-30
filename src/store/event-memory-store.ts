@@ -44,6 +44,8 @@ export interface MemoryEventDraft {
   kind: EventKind;
   content: string;
   evidenceQuote?: string | null;
+  /** Explicit facet tags; when omitted they are derived from the text. */
+  entities?: string[];
 }
 
 export interface MemoryEvent {
@@ -60,6 +62,12 @@ export interface MemoryEvent {
   createdAt: string;
   concretedAt: string | null;
   concretionRunId: number | null;
+  /** Times memory_search returned this event (recall accounting). */
+  hitCount: number;
+  /** ISO date of the most recent recall, or null when never recalled. */
+  lastHitAt: string | null;
+  /** Lowercase facet tags ('|tag1|tag2|' storage split into an array). */
+  entities: string[];
 }
 
 export interface CaptureEventsOptions {
@@ -138,6 +146,46 @@ function cleanNullable(value?: string | null): string | null {
   return trimmed ? trimmed : null;
 }
 
+/** Cap per event: enough to index the actors that matter, small enough to keep
+ * the facet column and its LIKE probe cheap. */
+const MAX_EVENT_ENTITIES = 8;
+
+/** Deterministic facet derivation — no extra LLM call. Tickets, repo/package
+ * slugs, and dotted/path-like identifiers are the entities that make "find the
+ * ticket" or "find the repo" recall work without a semantic query. */
+export function deriveEventEntities(...texts: Array<string | null | undefined>): string[] {
+  const joined = texts.filter((text): text is string => typeof text === "string" && text.length > 0).join("\n");
+  if (!joined) return [];
+  const found = new Set<string>();
+  const add = (value: string) => {
+    const tag = value.trim().toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, "");
+    if (tag.length >= 2 && tag.length <= 120) found.add(tag);
+  };
+
+  // Tickets: IAR-1839, GD-1, SEC-42 (uppercase project key + digits).
+  for (const match of joined.matchAll(/\b([A-Z][A-Z0-9]{1,9}-\d{1,6})\b/g)) add(match[1]!);
+  // Repo/package slugs and relative paths: owner/repo, pkg/sub, a.b/c.d.
+  for (const match of joined.matchAll(/(?:^|[\s(\[`"'])([\w.-]+\/[\w./-]{2,})/g)) add(match[1]!);
+  // Dotted identifiers (files, packages, domains): foo.ts, @scope/pkg, api.x.io.
+  for (const match of joined.matchAll(/\b([\w@-]+(?:\.[\w-]+){1,4})\b/g)) {
+    const value = match[1]!;
+    if (/\d+\.\d+/.test(value) && !/[a-z]/i.test(value.replace(/[\d.]/g, ""))) continue; // versions skip
+    add(value);
+  }
+
+  return [...found].slice(0, MAX_EVENT_ENTITIES);
+}
+
+function parseEntityTokens(raw: string | null): string[] {
+  if (!raw) return [];
+  return raw.split("|").map((token) => token.trim()).filter(Boolean);
+}
+
+function serializeEntityTokens(entities: string[]): string | null {
+  if (entities.length === 0) return null;
+  return `|${entities.join("|")}|`;
+}
+
 function mapEventRow(row: Record<string, unknown>): MemoryEvent {
   return {
     id: Number(row.id),
@@ -153,6 +201,9 @@ function mapEventRow(row: Record<string, unknown>): MemoryEvent {
     createdAt: String(row.created_at),
     concretedAt: cleanNullable(row.concreted_at as string | null),
     concretionRunId: row.concretion_run_id == null ? null : Number(row.concretion_run_id),
+    hitCount: row.hit_count == null ? 0 : Number(row.hit_count),
+    lastHitAt: cleanNullable(row.last_hit_at as string | null),
+    entities: parseEntityTokens(row.entities as string | null),
   };
 }
 
@@ -199,8 +250,8 @@ export function captureMemoryEvents(
   const insert = db.prepare(`
     INSERT OR IGNORE INTO memory_events (
       capture_id, project, scope, kind, content, evidence_quote, source,
-      source_session_id, occurred_at, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      source_session_id, occurred_at, created_at, entities
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const find = db.prepare(`
     SELECT id
@@ -238,6 +289,9 @@ export function captureMemoryEvents(
 
       const scopedProject = draft.scope === "project" ? project : null;
       const identity = sourceSessionId ?? captureId;
+      const entities = serializeEntityTokens(
+        draft.entities?.length ? draft.entities.flatMap((entity) => deriveEventEntities(entity)) : deriveEventEntities(content, evidenceQuote),
+      );
       const inserted = insert.run(
         captureId,
         scopedProject,
@@ -249,6 +303,7 @@ export function captureMemoryEvents(
         sourceSessionId,
         occurredAt,
         createdAt,
+        entities,
       ) as { changes: number; lastInsertRowid: number | bigint };
 
       if (inserted.changes > 0) {
@@ -380,19 +435,85 @@ export function getPendingConcretionStats(dbManager: DatabaseManager): {
   };
 }
 
+function todayDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/** Record one recall per returned event (batched). Mirrors the extended-store
+ * hit accounting so the episodic ledger gets the same promotion-gate data.
+ * Failures must never break the read path; callers swallow errors. */
+export function recordEventHits(dbManager: DatabaseManager, ids: number[]): void {
+  if (ids.length === 0) return;
+  const db = dbManager.getDb();
+  const placeholders = ids.map(() => "?").join(", ");
+  db.prepare(
+    `UPDATE memory_events SET hit_count = hit_count + 1, last_hit_at = ? WHERE id IN (${placeholders})`,
+  ).run(todayDate(), ...ids);
+}
+
+/** Per-principle recall evidence for concretion: how often the events behind a
+ * principle were actually recalled, and when any of them last was. Principles
+ * whose evidence is never recalled are weaker keep candidates. */
+export interface PrincipleUsageSignal {
+  principleId: number;
+  sourceEventCount: number;
+  totalHits: number;
+  lastHitAt: string | null;
+}
+
+export function getPrincipleUsageSignals(dbManager: DatabaseManager): Map<number, PrincipleUsageSignal> {
+  const principles = getAllActivePrinciples(dbManager);
+  const signals = new Map<number, PrincipleUsageSignal>();
+  if (principles.length === 0) return signals;
+  const db = dbManager.getDb();
+  const statement = db.prepare("SELECT hit_count, last_hit_at FROM memory_events WHERE id = ?");
+  for (const principle of principles) {
+    let totalHits = 0;
+    let lastHitAt: string | null = null;
+    let sourceEventCount = 0;
+    for (const eventId of principle.sourceEventIds) {
+      const row = statement.get(eventId) as { hit_count?: unknown; last_hit_at?: unknown } | undefined;
+      if (!row) continue;
+      sourceEventCount++;
+      totalHits += row.hit_count == null ? 0 : Number(row.hit_count);
+      const hit = cleanNullable(row.last_hit_at as string | null);
+      if (hit && (!lastHitAt || hit > lastHitAt)) lastHitAt = hit;
+    }
+    signals.set(principle.id, { principleId: principle.id, sourceEventCount, totalHits, lastHitAt });
+  }
+  return signals;
+}
+
+/** Per-hit relevance bonus for episodic ranking. BM25 scores are small
+ * negative numbers (more negative = better); subtracting up to 1.0 for
+ * frequently recalled events lets usage outrank age WITHOUT ever penalizing
+ * old events — a rarely recalled old event keeps its pure BM25 position. */
+const EVENT_HIT_BONUS_PER_HIT = 0.02;
+/** Bonus ceiling in hits: 50 recalls = full 1.0 bonus, further hits add none. */
+const EVENT_HIT_BONUS_MAX_HITS = 50;
+
 export function searchMemoryEvents(
   dbManager: DatabaseManager,
   query: string,
-  options: { project?: string | null; scope?: EventScope; kind?: EventKind; source?: EventSource; limit?: number } = {},
+  options: {
+    project?: string | null;
+    scope?: EventScope;
+    kind?: EventKind;
+    source?: EventSource;
+    /** Facet filter: matches one normalized entity tag (e.g. 'iar-1839'). */
+    entity?: string;
+    limit?: number;
+  } = {},
 ): MemoryEvent[] {
   const normalized = normalizeFts5Query(query);
   if (!normalized) return [];
   const db = dbManager.getDb();
   const limit = Math.max(1, Math.min(options.limit ?? 10, 50));
   let parseError = false;
+  const entityTag = options.entity?.trim().toLowerCase() || null;
 
   const run = (matchQuery: string): MemoryEvent[] => {
-    const conditions = ["e.id IN (SELECT rowid FROM event_fts WHERE event_fts MATCH ?)"];
+    const conditions = ["event_fts MATCH ?"];
     const params: unknown[] = [matchQuery];
     if (options.project !== undefined) {
       if (options.project === null) conditions.push("e.project IS NULL");
@@ -413,12 +534,21 @@ export function searchMemoryEvents(
       conditions.push("e.source = ?");
       params.push(options.source);
     }
+    if (entityTag) {
+      conditions.push("e.entities LIKE ? ESCAPE '\\'");
+      params.push(`%|${entityTag.replace(/[\\%_]/g, (ch) => `\\${ch}`)}|%`);
+    }
     try {
+      // Relevance first: BM25 (lower is better), minus the bounded usage bonus.
+      // Age is only the deterministic tiebreaker, never the primary order —
+      // an old event that matches the query outranks a newer weaker match.
       const rows = db.prepare(`
-        SELECT e.*
+        SELECT e.*, bm25(event_fts) AS rank_score
         FROM memory_events e
+        JOIN event_fts ON event_fts.rowid = e.id
         WHERE ${conditions.join(" AND ")}
-        ORDER BY e.occurred_at DESC, e.id DESC
+        ORDER BY rank_score - ${EVENT_HIT_BONUS_PER_HIT} * MIN(e.hit_count, ${EVENT_HIT_BONUS_MAX_HITS}) ASC,
+                 e.occurred_at DESC, e.id DESC
         LIMIT ?
       `).all(...params, limit) as Record<string, unknown>[];
       return rows.map(mapEventRow);

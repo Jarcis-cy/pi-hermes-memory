@@ -145,7 +145,13 @@ export const SCHEMA_SQL = `
     occurred_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     concreted_at TEXT,
-    concretion_run_id INTEGER REFERENCES concretion_runs(id)
+    concretion_run_id INTEGER REFERENCES concretion_runs(id),
+    -- Recall accounting: the promotion-gate signal for curating the ledger.
+    -- Ranking uses it as a small relevance bonus (never a recency penalty).
+    hit_count INTEGER NOT NULL DEFAULT 0,
+    last_hit_at DATE,
+    -- Structured facet index: '|tag1|tag2|' tokens (tickets, repos, paths).
+    entities TEXT
   );
 
   CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_events_capture_identity

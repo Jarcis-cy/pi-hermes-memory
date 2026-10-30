@@ -7,6 +7,7 @@ import {
   failConcretionRun,
   getAllActivePrinciples,
   getMemoryEvents,
+  getPrincipleUsageSignals,
   getPendingConcretionStats,
   startConcretionRun,
   writePrinciplesSnapshot,
@@ -119,9 +120,10 @@ export function parseConcretionResponse(text: string): ConcretionCandidate[] | n
   return candidates;
 }
 
-function buildConcretionUserPrompt(
+export function buildConcretionUserPrompt(
   events: ReturnType<typeof getMemoryEvents>,
   principles: ReturnType<typeof getAllActivePrinciples>,
+  usageSignals: ReturnType<typeof getPrincipleUsageSignals> | null = null,
 ): string {
   const eventLines = events.map((event) => JSON.stringify({
     id: event.id,
@@ -140,12 +142,33 @@ function buildConcretionUserPrompt(
     rationale: principle.rationale,
     source_event_ids: principle.sourceEventIds,
   }));
+  const signalLines: string[] = [];
+  if (usageSignals && usageSignals.size > 0) {
+    for (const principle of principles) {
+      const signal = usageSignals.get(principle.id);
+      if (!signal) continue;
+      const lastRecall = signal.lastHitAt ?? "never";
+      signalLines.push(
+        `- P${principle.id}: ${signal.sourceEventCount} source event(s), recalled ${signal.totalHits}× total, last recalled ${lastRecall}`,
+      );
+    }
+  }
   return [
     "--- Pending Events (JSONL) ---",
     ...eventLines,
     "",
     "--- Active Principles (JSONL) ---",
     ...(principleLines.length ? principleLines : ["(none)"]),
+    ...(signalLines.length
+      ? [
+        "",
+        "--- Principle Usage Signals ---",
+        "Recall counts show which principles' evidence is actually exercised in real work.",
+        "A principle whose evidence has never been recalled is a weaker keep candidate when merging",
+        "near-duplicates; one with frequent recall is load-bearing and must not be dropped.",
+        ...signalLines,
+      ]
+      : []),
   ].join("\n");
 }
 
@@ -181,7 +204,11 @@ export async function runConcretion(
     const completePrinciples = getAllActivePrinciples(dbManager);
 
     runId = startConcretionRun(dbManager, trigger, lockedEvents.length);
-    const userPrompt = buildConcretionUserPrompt(lockedEvents, completePrinciples);
+    const userPrompt = buildConcretionUserPrompt(
+      lockedEvents,
+      completePrinciples,
+      getPrincipleUsageSignals(dbManager),
+    );
     const runDirect = deps.runDirectJsonCompletion ?? runDirectJsonCompletion;
     const runChild = deps.execChildPrompt ?? execChildPrompt;
     let candidates: ConcretionCandidate[] | null = null;
