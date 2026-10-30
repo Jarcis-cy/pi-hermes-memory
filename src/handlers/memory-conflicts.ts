@@ -77,9 +77,13 @@ export function registerMemoryConflictsCommand(
         return;
       }
 
-      const match = trimmed.match(/^(\d+)\s+(accept|existing|both)(?:\s+([\s\S]+))?$/i);
+      const match = trimmed.match(/^(\d+)\s+(accept|existing|both)(?:\s+(distinct)(?![a-z]))?(?:\s+([\s\S]+))?$/i);
       if (!match) {
-        ctx.ui.notify("Usage: /memory-conflicts <id> accept|existing|both [optional explanation]", "error");
+        ctx.ui.notify(
+          "Usage: /memory-conflicts <id> accept|existing|both [distinct] [optional explanation]\n"
+            + "  distinct — keep this candidate even if it reads like a reworded copy of an active principle",
+          "error",
+        );
         return;
       }
       const conflictId = Number(match[1]);
@@ -94,7 +98,8 @@ export function registerMemoryConflictsCommand(
         conflictId,
         decision,
         principleCharLimit,
-        match[3],
+        match[4],
+        { allowRestatement: (match[3] ?? "").toLowerCase() === "distinct" },
       );
       if (!result.success) {
         ctx.ui.notify(result.message, "error");

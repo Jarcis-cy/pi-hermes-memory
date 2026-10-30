@@ -820,6 +820,10 @@ function addPrincipleInTransaction(
     supersedesIds?: number[];
   },
   charLimit: number,
+  /** `skipRestatementCheck` is the user's explicit "keep it separate" override for
+   * the possible-restatement gate; it never skips the absorb-tier duplicate check
+   * and never skips the capacity check. */
+  options: { skipRestatementCheck?: boolean } = {},
 ): {
   principleId?: number;
   duplicateId?: number;
@@ -861,13 +865,15 @@ function addPrincipleInTransaction(
 
   // Possible restatement: do not add a second copy and do not silently merge a
   // rule that may carry new nuance — park it for a human decision instead.
-  const possibleRestatement = findNearDuplicatePrinciple(
-    db,
-    { scope: input.scope, project, content, excludeIds: supersedesIds },
-    PRINCIPLE_POSSIBLE_RESTATEMENT_THRESHOLD,
-  );
-  if (possibleRestatement) {
-    return { restatementOf: possibleRestatement.id, restatementSimilarity: possibleRestatement.similarity };
+  if (!options.skipRestatementCheck) {
+    const possibleRestatement = findNearDuplicatePrinciple(
+      db,
+      { scope: input.scope, project, content, excludeIds: supersedesIds },
+      PRINCIPLE_POSSIBLE_RESTATEMENT_THRESHOLD,
+    );
+    if (possibleRestatement) {
+      return { restatementOf: possibleRestatement.id, restatementSimilarity: possibleRestatement.similarity };
+    }
   }
 
   if (activePrinciplePayloadChars(db, { scope: input.scope, project, content, supersedesIds }) > charLimit) {
@@ -1178,15 +1184,19 @@ export function applyConcretionPlan(
         });
         result.conflicts++;
       } else if (added.restatementOf) {
+        // The restatement target is a REFERENCE, not a supersede target: putting it
+        // in conflicting_principle_ids would make a plain `accept` silently retire
+        // the principle the candidate merely restates.
         recordConflictInTransaction(db, {
           scope,
           project,
           content,
           rationale,
-          conflictingPrincipleIds: [...relevantExistingIds, added.restatementOf],
+          conflictingPrincipleIds: relevantExistingIds,
           sourceEventIds,
           reason: `Possible restatement of P${added.restatementOf}`
-            + ` (similarity ${added.restatementSimilarity?.toFixed(2)}): merge it into that principle or keep both.`,
+            + ` (similarity ${added.restatementSimilarity?.toFixed(2)}): merge it into P${added.restatementOf},`
+            + " keep it separate with `distinct`, or reject it.",
         });
         result.conflicts++;
       } else if (added.overCapacity) {
@@ -1304,6 +1314,9 @@ export function resolvePrincipleConflict(
   decision: "accept_candidate" | "keep_existing" | "keep_both",
   charLimit: number,
   resolution?: string,
+  /** `allowRestatement` is the explicit "keep it separate" override offered by the
+   * command as `accept distinct` / `both distinct`. */
+  options: { allowRestatement?: boolean } = {},
 ): { success: boolean; message: string; principleId?: number } {
   const db = dbManager.getDb();
   const row = db.prepare("SELECT * FROM principle_conflicts WHERE id = ? AND status = 'pending'").get(conflictId) as Record<string, unknown> | undefined;
@@ -1338,7 +1351,7 @@ export function resolvePrincipleConflict(
           normalizedScope.project,
         )
         : [],
-    }, charLimit);
+    }, charLimit, { skipRestatementCheck: options.allowRestatement === true });
     if (!outcome.principleId && !outcome.duplicateId) return;
     const principleId = outcome.principleId ?? outcome.duplicateId!;
     db.prepare(`
@@ -1356,11 +1369,14 @@ export function resolvePrincipleConflict(
   if (transaction) transaction();
   else apply();
   if (outcome.restatementOf) {
+    // Actionable on purpose: the plain accept would hit the same gate again, so
+    // name the exact command that overrides it (#restatement-dead-end).
     return {
       success: false,
       message: `This candidate looks like a restatement of P${outcome.restatementOf}`
         + ` (similarity ${outcome.restatementSimilarity?.toFixed(2)}). Merge it with /memory-concretize,`
-        + " or keep it separate by accepting it as a distinct principle.",
+        + ` or keep it separate with /memory-conflicts ${conflictId} ${decision === "keep_both" ? "both" : "accept"} distinct`
+        + " (or reject it).",
     };
   }
   if (outcome.overCapacity) {

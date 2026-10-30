@@ -1054,4 +1054,45 @@ describe("event-memory-store", () => {
     const resolved = resolvePrincipleConflict(dbManager, row.id, "accept_candidate", 20000);
     assert.equal(resolved.success, true, "the parked candidate is now actionable");
   });
+  it("lets the user keep a possible restatement separate instead of a dead end", () => {
+    const first = captureMemoryEvents(dbManager, [{ scope: "global", kind: "failure", content: "Adapter wiring failed." }], {
+      captureId: "distinct-1", source: "manual",
+    });
+    const run1 = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run1, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Verify the consumer's expected field path before wiring an adapter boundary.",
+      rationale: "Consumer mismatch.",
+      sourceEventIds: first.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+
+    const second = captureMemoryEvents(dbManager, [{ scope: "global", kind: "failure", content: "Adapter wiring failed again." }], {
+      captureId: "distinct-2", source: "manual",
+    });
+    const run2 = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run2, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Verify the consumer's expected field path and route before wiring a new adapter boundary.",
+      rationale: "Reworded.",
+      sourceEventIds: second.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+    const [conflict] = getPendingPrincipleConflicts(dbManager, 5);
+    assert.ok(conflict, "the reworded copy is parked as a conflict");
+
+    // 普通 accept 会被二档门挡住，但错误信息必须给出可执行的出路
+    const blocked = resolvePrincipleConflict(dbManager, conflict!.id, "accept_candidate", 20000);
+    assert.equal(blocked.success, false);
+    assert.match(blocked.message, /accept distinct/);
+    assert.equal(getPendingPrincipleConflicts(dbManager, 5).length, 1, "the conflict stays pending after the blocked accept");
+
+    // 显式 distinct 才能落地为独立原则
+    const forced = resolvePrincipleConflict(dbManager, conflict!.id, "accept_candidate", 20000, undefined, { allowRestatement: true });
+    assert.equal(forced.success, true, forced.message);
+    assert.equal(getActivePrinciples(dbManager).length, 2);
+    assert.equal(getPendingPrincipleConflicts(dbManager, 5).length, 0);
+  });
 });

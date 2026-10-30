@@ -242,9 +242,12 @@ hole:
   plus CJK bigrams — deterministic, no embedding provider.
 - **Encoding gate** — a new principle that merely restates an active one in the
   same scope (token-set Jaccard ≥ 0.85) does not mint a second row: it
-  reinforces the existing principle and links the new source events. Only
-  genuinely new rules are added, so the layer does not accumulate duplicates
-  that later force a budget emergency.
+  reinforces the existing principle and links the new source events. A reworded
+  copy in the 0.65–0.85 band is neither absorbed nor added: it is parked as a
+  `Possible restatement of P<n>` conflict, resolved with
+  `/memory-conflicts <id> accept|both distinct` (keep it separate) or
+  `/memory-concretize` (merge). Only genuinely new rules are added, so the layer
+  does not accumulate duplicates that later force a budget emergency.
 
 Nothing is deleted by either path: the concrete event record stays the ground
 truth, principles are the abstraction over it.
@@ -262,6 +265,8 @@ truth, principles are the abstraction over it.
   `concretionTimeoutMs`: concretion prompts run under `consolidationTimeoutMs`
   (default 180s). A subprocess kill therefore shows up as exit code 124, and there
   is no automatic retry — a failed run is retried only when the next trigger fires.
+  Budget the wall clock above the configured value: spawn/teardown and the parent
+  side add roughly a minute (a 180s setting has been observed to die at ~236s).
 
 ## Distillation Resilience
 
