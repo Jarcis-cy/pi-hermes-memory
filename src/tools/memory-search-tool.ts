@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { DatabaseManager } from '../store/db.js';
 import { searchMemories, getMemoryStats, recordSearchHits } from '../store/sqlite-memory-store.js';
-import { recordEventHits, searchMemoryEvents } from '../store/event-memory-store.js';
+import { recordEventHits, searchMemoryEvents, searchPrinciples } from '../store/event-memory-store.js';
 import type { MemoryCategory } from '../types.js';
 import { createSharedToolResultRenderer } from './shared-output-view.js';
 import { searchResultView } from './tool-result-views.js';
@@ -41,6 +41,7 @@ Use cases:
 - Find user preferences: "What are the user's testing preferences?"
 - Search for past failures: "memory_search('auth', category='failure')"
 - Recall what happened in a prior task: episodic results include event IDs (E#), dates, kinds, and evidence quotes; adaptive principles are already injected when enabled, source events stay searchable here.
+- Recall a principle that was NOT injected this run (injection is budgeted): principles matching the query come back labeled [P<id>/<scope>].
 
 target="project" returns only project-attributed memory entries (the ones labeled [target=project]); combine with project to search a named project.
 
@@ -85,6 +86,15 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
           ? (project ? 'project' : 'global')
           : undefined;
       const entity = args.entity?.trim() || undefined;
+      // Principles are directives, not evidence: they get a small reserved slice
+      // of the result budget and are skipped for category/entity filters, which
+      // only describe the memory/event stores.
+      const principleLimit = category || entity ? 0 : Math.min(3, limit);
+      const principles = principleLimit === 0 ? [] : searchPrinciples(dbManager, query, {
+        project: project === undefined ? null : project,
+        scope: target === 'user' ? 'user' : target === 'failure' ? undefined : target === 'memory' ? (project ? 'project' : 'global') : undefined,
+        limit: principleLimit,
+      });
       const events = searchMemoryEvents(dbManager, query, {
         project: project === undefined ? undefined : project,
         scope: eventScope,
@@ -93,13 +103,13 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
         limit,
       });
       const eventContents = new Set(events.map((event) => event.content));
-      const legacyLimit = Math.max(0, limit - events.length);
+      const legacyLimit = Math.max(0, limit - events.length - principles.length);
       const legacy = legacyLimit === 0
         ? []
         : searchMemories(dbManager, query, { project, target, category, limit })
           .filter((entry) => !eventContents.has(entry.content))
           .slice(0, legacyLimit);
-      const combinedCount = legacy.length + events.length;
+      const combinedCount = legacy.length + events.length + principles.length;
 
       if (combinedCount === 0) {
         const result: SearchResult = { success: true, count: 0, message: `No memories found matching "${query}". Try a different search term or broader query.` };
@@ -120,6 +130,14 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
       }
 
       let output = `Found ${combinedCount} memory result${combinedCount === 1 ? '' : 's'} matching "${query}":\n\n`;
+
+      for (const { principle, score } of principles) {
+        const scopeLabel = principle.scope === 'project'
+          ? `project:${encodeURIComponent(principle.project ?? '')}`
+          : principle.scope;
+        output += `📐 P${principle.id} [${scopeLabel}] ${principle.content}\n`;
+        output += `   Adaptation principle (generalized default, fallible; current instructions win). match=${score.toFixed(2)}\n\n`;
+      }
 
       for (const event of events) {
         const projectLabel = event.project ? `[${event.project}]` : event.scope === 'user' ? '[user]' : '[global]';

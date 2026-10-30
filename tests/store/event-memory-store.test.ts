@@ -18,6 +18,7 @@ import {
   getPrincipleUsageSignals,
   recordEventHits,
   searchMemoryEvents,
+  searchPrinciples,
   startConcretionRun,
   writePrinciplesSnapshot,
 } from "../../src/store/event-memory-store.js";
@@ -768,5 +769,87 @@ describe("event-memory-store", () => {
     assert.equal(applied.merged, 0);
     assert.equal(applied.conflicts, 1);
     assert.equal(getActivePrinciples(dbManager).length, 1);
+  });
+  it("recalls active principles cold, scoped to the view", () => {
+    const capture = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "failure",
+      content: "Consumer field path was wrong.",
+    }], { captureId: "principle-recall", source: "manual" });
+    const run = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Verify the consumer's expected field path before wiring a new adapter boundary.",
+      rationale: "Wiring silently defaulted.",
+      sourceEventIds: capture.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+
+    const [hit] = searchPrinciples(dbManager, "consumer field path adapter", { project: null });
+    assert.ok(hit, "principle must be recallable after injection drops it");
+    assert.match(hit!.principle.content, /field path/);
+    assert.ok(hit!.score > 0.5);
+
+    assert.equal(searchPrinciples(dbManager, "kubernetes helm", { project: null }).length, 0, "unrelated query must not recall it");
+    assert.equal(searchPrinciples(dbManager, "", { project: null }).length, 0, "empty query is not a cue");
+    // 作用域过滤：这条是 global，按 user 作用域查不到
+    assert.equal(searchPrinciples(dbManager, "consumer field path", { project: null, scope: "user" }).length, 0);
+  });
+
+  it("absorbs a near-duplicate principle instead of minting a second row", () => {
+    const first = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "failure",
+      content: "Adapter wiring failed.",
+    }], { captureId: "gate-1", source: "manual" });
+    const run1 = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run1, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Verify the consumer's expected field path before wiring a new adapter boundary.",
+      rationale: "Consumer mismatch.",
+      sourceEventIds: first.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+
+    // 几乎同义的复述：必须被吸收（reinforced），不新增行
+    const second = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "failure",
+      content: "Adapter wiring failed again.",
+    }], { captureId: "gate-2", source: "manual" });
+    const run2 = startConcretionRun(dbManager, "manual", 1);
+    const applied = applyConcretionPlan(dbManager, run2, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Verify the consumer's expected field path before wiring an adapter boundary.",
+      rationale: "Same lesson repeated.",
+      sourceEventIds: second.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+
+    assert.equal(applied.added, 0);
+    assert.equal(applied.reinforced, 1, "near duplicate must reinforce the existing principle");
+    assert.equal(getActivePrinciples(dbManager).length, 1);
+
+    // 真正不同的规则仍然新增
+    const third = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "insight",
+      content: "Mutex held across a channel send.",
+    }], { captureId: "gate-3", source: "manual" });
+    const run3 = startConcretionRun(dbManager, "manual", 1);
+    const distinct = applyConcretionPlan(dbManager, run3, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Never hold the task mutex across a blocking channel send; enqueue outside the critical section.",
+      rationale: "Deadlock.",
+      sourceEventIds: third.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+
+    assert.equal(distinct.added, 1);
+    assert.equal(getActivePrinciples(dbManager).length, 2);
   });
 });

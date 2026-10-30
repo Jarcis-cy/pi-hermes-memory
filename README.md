@@ -228,6 +228,27 @@ derived at capture time without an extra LLM call. Filter with
 `memory_search(query, entity: "iar-1839")` to recall by actor instead of by wording.
 The column is added to existing ledgers automatically on open.
 
+## Principle Layer: Cold Recall and the Encoding Gate
+
+Principles are injected under a character budget, so a principle can be active
+without being in this run's prompt. Two mechanisms keep that from becoming a
+hole:
+
+- **Cold recall** — `memory_search` also searches the active principle layer
+  (global + user + the current project). Matches come back labeled
+  `📐 P<id> [scope]` with an adaptation-principle marker, so a principle that fell
+  out of the injection budget stays reachable by cue instead of disappearing.
+  Lexical coverage with light inflection folding (`restart` matches `restarting`),
+  plus CJK bigrams — deterministic, no embedding provider.
+- **Encoding gate** — a new principle that merely restates an active one in the
+  same scope (token-set Jaccard ≥ 0.85) does not mint a second row: it
+  reinforces the existing principle and links the new source events. Only
+  genuinely new rules are added, so the layer does not accumulate duplicates
+  that later force a budget emergency.
+
+Nothing is deleted by either path: the concrete event record stays the ground
+truth, principles are the abstraction over it.
+
 ## Standing Instructions
 
 Recall is probabilistic. In `policy-only` mode a stored rule only takes effect if the agent decides to call `memory_search` **before** the action the rule would have prevented — and for a prohibition, that is exactly the moment it has no reason to look. Preferences survive a missed lookup; prohibitions do not.
