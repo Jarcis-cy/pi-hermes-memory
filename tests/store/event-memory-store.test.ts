@@ -14,6 +14,9 @@ import {
   importLegacyMemoriesAsEvents,
   renderAdaptivePrinciples,
   resolvePrincipleConflict,
+  deriveEventEntities,
+  getPrincipleUsageSignals,
+  recordEventHits,
   searchMemoryEvents,
   startConcretionRun,
   writePrinciplesSnapshot,
@@ -432,5 +435,151 @@ describe("event-memory-store", () => {
     await writePrinciplesSnapshot(dbManager, snapshot);
     await writePrinciplesSnapshot(dbManager, snapshot);
     assert.match(fs.readFileSync(snapshot, "utf-8"), /# Adaptive Principles/);
+  });
+  it("ranks by relevance, not recency, and lets recall outrank age", () => {
+    // Old but strongly relevant evidence vs a recent weak match. Both carry
+    // the query term; BM25 (term frequency) must beat the newer document.
+    captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "insight",
+      content: "redis redis redis INTERNALSECRET comes from the AUTH handshake on the cluster bus",
+      evidenceQuote: "redis cluster bus",
+    }], {
+      captureId: "old-strong",
+      source: "manual",
+      occurredAt: "2026-01-05T00:00:00.000Z",
+    });
+    captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "fact",
+      content: "redis notes",
+    }], {
+      captureId: "new-weak",
+      source: "manual",
+      occurredAt: "2026-10-30T00:00:00.000Z",
+    });
+
+    const byRelevance = searchMemoryEvents(dbManager, "redis");
+    assert.equal(byRelevance.length, 2);
+    assert.equal(byRelevance[0]!.captureId, "old-strong", "BM25 relevance must outrank recency");
+
+    // Equal relevance: a recalled older event outranks an unrecalled newer one.
+    captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "fact",
+      content: "deployment window freeze applies to campaign imports",
+    }], {
+      captureId: "hit-old",
+      source: "manual",
+      occurredAt: "2026-02-01T00:00:00.000Z",
+    });
+    captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "fact",
+      content: "deployment window freeze applies to campaign imports",
+    }], {
+      captureId: "hit-new",
+      source: "manual",
+      sourceSessionId: "session-hit-new",
+      occurredAt: "2026-10-29T00:00:00.000Z",
+    });
+    const before = searchMemoryEvents(dbManager, "deployment window freeze");
+    const older = before.find((event) => event.captureId === "hit-old")!;
+    recordEventHits(dbManager, [older.id]);
+    const after = searchMemoryEvents(dbManager, "deployment window freeze");
+    assert.equal(after[0]!.captureId, "hit-old", "recall bonus lifts the equally relevant older event");
+    assert.equal(after.find((event) => event.captureId === "hit-old")!.hitCount, 1);
+    assert.ok(after.find((event) => event.captureId === "hit-old")!.lastHitAt);
+  });
+
+  it("derives facet entities and filters searches by them", () => {
+    assert.deepEqual(
+      deriveEventEntities("IAR-1839 regression: internal/agent/runtime transport broke"),
+      ["iar-1839", "internal/agent/runtime"],
+    );
+    captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "correction",
+      content: "window index migration crashed for IAR-1839 on fresh databases",
+      evidenceQuote: "窗口索引 prepare 步骤崩溃",
+    }], {
+      captureId: "facet-1",
+      project: "code-audit",
+      source: "manual",
+    });
+
+    const [event] = searchMemoryEvents(dbManager, "window index migration");
+    assert.ok(event!.entities.includes("iar-1839"), `entities should carry the ticket, got ${JSON.stringify(event!.entities)}`);
+
+    assert.equal(searchMemoryEvents(dbManager, "window index migration", { entity: "iar-1839" }).length, 1);
+    assert.equal(searchMemoryEvents(dbManager, "window index migration", { entity: "IAR-1839" }).length, 1, "entity filter is case-insensitive");
+    assert.equal(searchMemoryEvents(dbManager, "window index migration", { entity: "iar-9999" }).length, 0);
+  });
+
+  it("adds recall columns to a pre-existing ledger on open", () => {
+    const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), "event-memory-migrate-"));
+    try {
+      const legacyManager = new DatabaseManager(legacyDir);
+      const db = legacyManager.getDb();
+      // Simulate a database created before recall accounting existed.
+      db.exec("DROP TABLE memory_events");
+      db.exec(`CREATE TABLE memory_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        capture_id TEXT NOT NULL,
+        project TEXT,
+        scope TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        content TEXT NOT NULL,
+        evidence_quote TEXT,
+        source TEXT NOT NULL,
+        source_session_id TEXT,
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        concreted_at TEXT,
+        concretion_run_id INTEGER
+      )`);
+      legacyManager.close();
+
+      const reopened = new DatabaseManager(legacyDir);
+      const columns = (reopened.getDb().prepare("PRAGMA table_info(memory_events)").all() as Array<{ name: string }>)
+        .map((column) => column.name);
+      assert.ok(columns.includes("hit_count"), "hit_count column must be added on open");
+      assert.ok(columns.includes("last_hit_at"));
+      assert.ok(columns.includes("entities"));
+      reopened.close();
+    } finally {
+      fs.rmSync(legacyDir, { recursive: true, force: true });
+    }
+  });
+
+  it("summarizes per-principle recall evidence for concretion", () => {
+    const capture = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "failure",
+      content: "treat unresolved/not-verified findings as a separate report bucket",
+      evidenceQuote: "unresolved 仍然可见",
+    }], {
+      captureId: "principle-signal",
+      source: "manual",
+    });
+    const events = getMemoryEvents(dbManager, { pendingOnly: true });
+    const runId = startConcretionRun(dbManager, "manual", events.length);
+    applyConcretionPlan(dbManager, runId, events, [{
+      action: "add",
+      scope: "global",
+      content: "Distinguish unresolved findings from refuted ones before claiming visibility.",
+      rationale: "Repeated confusion between the two buckets.",
+      sourceEventIds: capture.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 5000 });
+    recordEventHits(dbManager, capture.eventIds);
+    recordEventHits(dbManager, capture.eventIds);
+
+    const signals = getPrincipleUsageSignals(dbManager);
+    assert.equal(signals.size, 1);
+    const [signal] = [...signals.values()];
+    assert.equal(signal!.sourceEventCount, 1);
+    assert.equal(signal!.totalHits, 2);
+    assert.ok(signal!.lastHitAt);
   });
 });

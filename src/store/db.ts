@@ -1132,6 +1132,7 @@ export class DatabaseManager {
 
   private ensureLegacySchemaColumns(db: DatabaseLike): void {
     this.ensureMemoriesColumns(db);
+    this.ensureMemoryEventsColumns(db);
     this.ensureSessionsColumns(db);
   }
 
@@ -1161,6 +1162,22 @@ export class DatabaseManager {
     }
     if (!names.has('last_hit_at')) {
       db.exec('ALTER TABLE memories ADD COLUMN last_hit_at DATE');
+    }
+  }
+
+  private ensureMemoryEventsColumns(db: DatabaseLike): void {
+    const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memory_events'").get() as { name: string } | undefined;
+    if (!tableExists) return;
+
+    const names = this.getColumnNames(db, 'memory_events');
+    if (!names.has('hit_count')) {
+      db.exec('ALTER TABLE memory_events ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!names.has('last_hit_at')) {
+      db.exec('ALTER TABLE memory_events ADD COLUMN last_hit_at DATE');
+    }
+    if (!names.has('entities')) {
+      db.exec('ALTER TABLE memory_events ADD COLUMN entities TEXT');
     }
   }
 

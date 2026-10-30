@@ -61,6 +61,50 @@ function renderUsageScope(label: string, stats: UsageScopeStats | null): string[
   return lines;
 }
 
+/** Event-ledger recall stats: how much of the episodic history is actually
+ * being consulted, and which events carry the load. Fail-open like the rest. */
+interface EventUsageStats {
+  total: number;
+  tracked: number;
+  top: Array<{ content: string; hits: number; lastHit: string | null }>;
+}
+
+function eventUsageStats(dbManager: DatabaseManager | null): EventUsageStats | null {
+  if (!dbManager) return null;
+  try {
+    const db = dbManager.getDb();
+    const total = (db.prepare("SELECT COUNT(*) AS count FROM memory_events").get() as { count: number | bigint }).count;
+    const rows = db.prepare(
+      "SELECT content, hit_count, last_hit_at FROM memory_events WHERE hit_count > 0 ORDER BY hit_count DESC, id DESC LIMIT ?",
+    ).all(USAGE_TOP_ENTRIES) as Array<{ content: string; hit_count: number | bigint; last_hit_at: string | null }>;
+    const tracked = (db.prepare("SELECT COUNT(*) AS count FROM memory_events WHERE hit_count > 0").get() as { count: number | bigint }).count;
+    return {
+      total: typeof total === "bigint" ? Number(total) : total,
+      tracked: typeof tracked === "bigint" ? Number(tracked) : tracked,
+      top: rows.map((row) => ({
+        content: String(row.content),
+        hits: typeof row.hit_count === "bigint" ? Number(row.hit_count) : Number(row.hit_count ?? 0),
+        lastHit: row.last_hit_at ?? null,
+      })),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function renderEventUsage(stats: EventUsageStats | null): string[] {
+  if (!stats || stats.total === 0) return [];
+  const lines = [`  📚 EPISODIC LEDGER — ${stats.tracked} of ${stats.total} events recalled via memory_search`];
+  if (stats.top.length === 0) {
+    lines.push("  (no recorded recalls yet — usage accrues as memory_search runs)");
+  } else {
+    stats.top.forEach((entry, i) => {
+      lines.push(`  ${i + 1}. ${entry.hits}x (last ${entry.lastHit ?? "unknown"}) — ${usageExcerpt(entry.content)}`);
+    });
+  }
+  return lines;
+}
+
 export function registerInsightsCommand(
   pi: ExtensionAPI,
   store: MemoryStore,
@@ -143,6 +187,12 @@ export function registerInsightsCommand(
       ];
       if (usageLines.length > 0) {
         lines.push(...usageLines);
+        lines.push("");
+      }
+
+      const eventLines = renderEventUsage(eventUsageStats(dbManager));
+      if (eventLines.length > 0) {
+        lines.push(...eventLines);
         lines.push("");
       }
 

@@ -834,6 +834,12 @@ export function removeExactSyncedMemories(
 /**
  * Search memories using FTS5.
  */
+/** Per-hit relevance bonus mirroring the episodic ledger's ranking: BM25
+ * relevance leads, bounded recall frequency breaks near-ties, and age only
+ * orders otherwise-equal rows. Zero-hit entries are unaffected. */
+const MEMORY_HIT_BONUS_PER_HIT = 0.02;
+const MEMORY_HIT_BONUS_MAX_HITS = 50;
+
 export function searchMemories(
   dbManager: DatabaseManager,
   query: string,
@@ -886,7 +892,8 @@ export function searchMemories(
       FROM memories m
       JOIN memory_fts ON memory_fts.rowid = m.id
       ${whereClause}
-      ORDER BY rank_score ASC, m.last_referenced DESC
+      ORDER BY rank_score - ${MEMORY_HIT_BONUS_PER_HIT} * MIN(COALESCE(m.hit_count, 0), ${MEMORY_HIT_BONUS_MAX_HITS}) ASC,
+               m.last_referenced DESC
       LIMIT ?
     `;
 

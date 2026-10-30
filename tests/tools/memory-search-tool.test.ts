@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { DatabaseManager } from '../../src/store/db.js';
+import { captureMemoryEvents } from '../../src/store/event-memory-store.js';
 import { addMemory, getMemoryUsageSignals } from '../../src/store/sqlite-memory-store.js';
 import { normalizeMemoryLookupText } from '../../src/store/memory-lookup.js';
 import { registerMemorySearchTool } from '../../src/tools/memory-search-tool.js';
@@ -168,7 +169,9 @@ describe('registerMemorySearchTool', () => {
         get(target, prop, receiver) {
           if (prop === 'prepare') {
             return (sql: string) => {
-              if (/hit_count/i.test(sql)) throw new Error('injected recording failure');
+              // Only the recall UPDATE fails; read paths legitimately mention
+              // the column in ranking expressions.
+              if (/SET\s+hit_count/i.test(sql)) throw new Error('injected recording failure');
               return (target as any).prepare(sql);
             };
           }
@@ -186,6 +189,32 @@ describe('registerMemorySearchTool', () => {
     assert.match(result.content[0].text, /resilient entry/);
     // The hit did NOT land (recording failed) but the search succeeded.
     assert.strictEqual(getMemoryUsageSignals(dbManager, { target: 'memory', project: null }).size, 0);
+
+    dbManager.close();
+  });
+  it("records episodic recalls and passes the entity facet filter", async () => {
+    const dbManager = makeDbManager();
+    const captured = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "failure",
+      content: "window index prepare crashed for IAR-1839 on fresh databases",
+      evidenceQuote: "窗口索引 prepare 步骤崩溃",
+    }], { captureId: "search-facet", source: "manual" });
+
+    let capturedTool: any;
+    registerMemorySearchTool({ registerTool: (def: any) => { capturedTool = def; } } as any, dbManager);
+
+    const miss = await capturedTool.execute("tc-miss", { query: "window index", entity: "iar-9999" });
+    assert.strictEqual(miss.details.count, 0);
+
+    const hit = await capturedTool.execute("tc-hit", { query: "window index", entity: "IAR-1839" });
+    assert.strictEqual(hit.details.count, 1);
+    assert.match(hit.content[0].text, /IAR-1839/);
+
+    const row = dbManager.getDb()
+      .prepare("SELECT hit_count FROM memory_events WHERE id = ?")
+      .get(captured.eventIds[0]!) as { hit_count: number };
+    assert.strictEqual(row.hit_count, 1, "episodic recall must be recorded on the ledger");
 
     dbManager.close();
   });
