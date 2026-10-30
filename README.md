@@ -249,6 +249,29 @@ hole:
 Nothing is deleted by either path: the concrete event record stays the ground
 truth, principles are the abstraction over it.
 
+## Principle Strength (Prehension Accounting)
+
+A principle is not permanently important because it exists. Three signals keep the
+layer honest, all recorded on `principles` and migrated on open:
+
+| Signal | Written by |
+|---|---|
+| `hit_count` / `last_hit_at` | cold recall through `memory_search` |
+| `applied_count` | background review: the run clearly followed the principle |
+| `violated_count` / `last_feedback_at` | background review: the run clearly ignored or contradicted it |
+
+`principleStrength()` derives a bounded score from them: base 1.0, halved for
+every 8 idle weeks since the principle was last felt, plus a log boost for recall
+and follow counts, plus a louder boost when a principle was violated within the
+last 30 days — an ignored default is the one worth resurfacing, not the one to
+bury. Strength orders selection only; nothing is deleted, and a principle that
+decays out of the prompt stays recallable through `memory_search`.
+
+Review verdicts are optional in the review payload
+(`"principle_feedback": {"applied": [ids], "violated": [ids]}`, ids as shown in
+`[P<id>/<scope>]`), validated, capped at 20 ids per verdict, and applied
+best-effort so they can never fail a review.
+
 ## Standing Instructions
 
 Recall is probabilistic. In `policy-only` mode a stored rule only takes effect if the agent decides to call `memory_search` **before** the action the rule would have prevented — and for a prohibition, that is exactly the moment it has no reason to look. Preferences survive a missed lookup; prohibitions do not.

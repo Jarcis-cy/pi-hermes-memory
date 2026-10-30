@@ -6,6 +6,7 @@ import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-a
 import { completeSimple, type Message, type SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MemoryStore } from "../store/memory-store.js";
+import { recordPrincipleFeedback } from "../store/event-memory-store.js";
 import type { DatabaseManager } from "../store/db.js";
 import type { MemoryCategory, MemoryConfig, MemoryResult, ThinkingLevel } from "../types.js";
 
@@ -557,6 +558,31 @@ function isReviewTarget(value: unknown): value is ReviewMemoryOperation["target"
 
 function isReviewAction(value: unknown): value is ReviewMemoryOperation["action"] {
   return value === "add" || value === "replace" || value === "remove";
+}
+
+/** Cap on how many principle ids one review may report per verdict; a runaway
+ * response must not turn into a mass counter update. */
+const MAX_FEEDBACK_IDS = 20;
+
+/**
+ * Optional review verdicts about injected principles, parsed from the same
+ * hardened payload cascade as the operations ("principle_feedback": {"applied":
+ * [ids], "violated": [ids]}). Ids are validated as positive integers, deduped,
+ * and capped; anything malformed is ignored rather than failing the review.
+ */
+export function parsePrincipleFeedback(text: string): { applied: number[]; violated: number[] } {
+  const payload = extractJsonPayload(text) as Record<string, unknown> | null;
+  const raw = payload?.principle_feedback;
+  const read = (value: unknown): number[] => {
+    if (!Array.isArray(value)) return [];
+    const ids = value
+      .map((id) => (typeof id === "number" ? id : typeof id === "string" ? Number(id) : Number.NaN))
+      .filter((id) => Number.isSafeInteger(id) && id > 0);
+    return [...new Set(ids)].slice(0, MAX_FEEDBACK_IDS);
+  };
+  if (!raw || typeof raw !== "object") return { applied: [], violated: [] };
+  const record = raw as Record<string, unknown>;
+  return { applied: read(record.applied), violated: read(record.violated) };
 }
 
 export function parseReviewOperations(text: string): ReviewMemoryOperation[] | null {
@@ -1112,6 +1138,17 @@ export async function runDirectMemoryCompletion(
           signal: options.signal,
         },
       );
+      // Principle prehension: the review reports which injected principles it
+      // saw clearly followed or ignored. Best-effort — feedback must never turn
+      // a successful review into a failure.
+      try {
+        const feedback = parsePrincipleFeedback(text);
+        if (dbManager && (feedback.applied.length > 0 || feedback.violated.length > 0)) {
+          recordPrincipleFeedback(dbManager, feedback);
+        }
+      } catch {
+        // ignored on purpose
+      }
       if (applied.aborted && applied.appliedCount === 0) {
         return aborted();
       }

@@ -18,6 +18,9 @@ import {
   getPrincipleUsageSignals,
   recordEventHits,
   searchMemoryEvents,
+  principleStrength,
+  recordPrincipleFeedback,
+  recordPrincipleHits,
   searchPrinciples,
   startConcretionRun,
   writePrinciplesSnapshot,
@@ -851,5 +854,49 @@ describe("event-memory-store", () => {
 
     assert.equal(distinct.added, 1);
     assert.equal(getActivePrinciples(dbManager).length, 2);
+  });
+  it("tracks principle prehension and derives strength from it", () => {
+    const capture = captureMemoryEvents(dbManager, [{
+      scope: "global",
+      kind: "failure",
+      content: "Adapter contract was unverified.",
+    }], { captureId: "strength-1", source: "manual" });
+    const run = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Verify the consumer's field path before wiring an adapter.",
+      rationale: "Contract",
+      sourceEventIds: capture.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+    const [fresh] = getActivePrinciples(dbManager);
+
+    const base = principleStrength(fresh!);
+    assert.ok(base > 0, "a fresh principle has positive strength");
+
+    recordPrincipleHits(dbManager, [fresh!.id]);
+    recordPrincipleHits(dbManager, [fresh!.id]);
+    recordPrincipleFeedback(dbManager, { applied: [fresh!.id] });
+    const recalled = getActivePrinciples(dbManager)[0]!;
+    assert.equal(recalled.hitCount, 2);
+    assert.equal(recalled.appliedCount, 1);
+    assert.ok(recalled.lastHitAt);
+    assert.ok(recalled.lastFeedbackAt);
+    assert.ok(principleStrength(recalled) > base, "use must increase strength");
+
+    // 违反是"响"的：被忽视的默认值应该回浮，而不是被埋掉
+    recordPrincipleFeedback(dbManager, { violated: [fresh!.id] });
+    const violated = getActivePrinciples(dbManager)[0]!;
+    assert.equal(violated.violatedCount, 1);
+    assert.ok(principleStrength(violated) > principleStrength(recalled), "recent violation must raise strength");
+
+    // 长期未被摄受 → 衰减
+    const later = new Date(Date.now() + 400 * 86_400_000);
+    assert.ok(principleStrength(violated, later) < principleStrength(violated), "idle strength decays");
+
+    // 已失效的原则不会被反馈计数误伤
+    recordPrincipleFeedback(dbManager, { violated: [999999] });
+    assert.equal(getActivePrinciples(dbManager)[0]!.violatedCount, 1);
   });
 });

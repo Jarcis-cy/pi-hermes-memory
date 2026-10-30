@@ -192,7 +192,16 @@ export const SCHEMA_SQL = `
     status TEXT NOT NULL CHECK (status IN ('active', 'superseded', 'rejected')),
     supersedes_id INTEGER REFERENCES principles(id),
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- Prehension accounting: how often this principle was actually felt — cold
+    -- recall (memory_search) and review verdicts (applied / violated). Strength
+    -- is derived from these, so a principle is never permanently "important"
+    -- just because it exists.
+    hit_count INTEGER NOT NULL DEFAULT 0,
+    last_hit_at DATE,
+    applied_count INTEGER NOT NULL DEFAULT 0,
+    violated_count INTEGER NOT NULL DEFAULT 0,
+    last_feedback_at DATE
   );
 
   CREATE TABLE IF NOT EXISTS principle_sources (
