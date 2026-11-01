@@ -91,6 +91,7 @@ If the whole batch warrants no principle, return {"candidates":[]}. If only some
 
 export interface ConcretionDeps {
   runDirectJsonCompletion?: typeof runDirectJsonCompletion;
+  runConcretion?: typeof runConcretion;
   execChildPrompt?: typeof execChildPrompt;
 }
 
@@ -428,7 +429,80 @@ export async function runConcretion(
 export function shouldRunAutomaticConcretion(dbManager: DatabaseManager, config: MemoryConfig): boolean {
   if (config.concretionEnabled === false) return false;
   const threshold = Math.max(1, config.concretionReviewThreshold ?? 10);
-  return getPendingConcretionStats(dbManager).backgroundReviewCaptures >= threshold;
+  // Count ALL pending events, not only background-review captures: events from
+  // session-flush and legacy-import never incremented the old counter, so they
+  // could queue forever without ever triggering their own distillation run
+  // (observed live: 90 such events sat pending indefinitely).
+  return getPendingConcretionStats(dbManager).events >= threshold;
+}
+
+/** Hard cap on distillation runs per background review (one steady-state run +
+ * up to three catch-up runs). Keeps shock-draining bounded in cost while still
+ * letting a large backlog clear within a few reviews instead of trickling. */
+export const CONCRETION_CATCHUP_MAX_RUNS = 4;
+/** When this many events are still pending after catch-up, say so in the
+ * session: a deep queue must be visible, not discovered days later. */
+export const CONCRETION_BACKLOG_ALERT_THRESHOLD = 300;
+
+export interface ConcretionCatchupResult {
+  /** Distillation runs actually executed in this catch-up pass. */
+  runs: number;
+  /** Totals across executed runs, for a single aggregated notification. */
+  aggregate: Pick<ConcretionResult, "added" | "refined" | "reinforced" | "merged" | "conflicts" | "ignored" | "skipped">;
+  /** Set when a run failed; a failure stops the pass — the next review
+   * retries, so one persistent error never becomes a retry storm. */
+  failure?: string;
+  /** Pending events remaining after the pass (drives the backlog alert). */
+  pendingAfter: number;
+}
+
+/**
+ * Bounded catch-up drain of the distillation queue.
+ *
+ * Contract: runs `runConcretion` repeatedly while pending events stay at or
+ * above the trigger threshold, never more than CONCRETION_CATCHUP_MAX_RUNS
+ * times per call. Steady state (a handful of pending events) runs once or not
+ * at all, exactly like the old single-shot trigger; a shock backlog drains at
+ * the cap rate instead of trickling one batch per review. The DB is read
+ * between runs, so concurrent sessions draining the same queue simply see the
+ * threshold pass and stop early. Best-effort by design: cancellation and run
+ * failure end the pass quietly, leaving events pending for the next trigger.
+ */
+export async function drainConcretionQueue(
+  pi: Pick<ExtensionAPI, "exec">,
+  ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
+  dbManager: DatabaseManager,
+  globalDir: string,
+  config: MemoryConfig,
+  options: {
+    isCancelled?: () => boolean;
+    onRunError?: (error: string) => void;
+  } = {},
+  deps: ConcretionDeps = {},
+): Promise<ConcretionCatchupResult> {
+  const run = deps.runConcretion ?? runConcretion;
+  const aggregate = { added: 0, refined: 0, reinforced: 0, merged: 0, conflicts: 0, ignored: 0, skipped: 0 };
+  let runs = 0;
+  let failure: string | undefined;
+  while (runs < CONCRETION_CATCHUP_MAX_RUNS && shouldRunAutomaticConcretion(dbManager, config)) {
+    if (options.isCancelled?.()) break;
+    const result = await run(pi, ctx, dbManager, globalDir, config, "automatic");
+    runs++;
+    if (!result.ok) {
+      const message = result.error ?? "no reason reported";
+      failure = message;
+      options.onRunError?.(message);
+      break;
+    }
+    aggregate.added += result.added;
+    aggregate.refined += result.refined;
+    aggregate.reinforced += result.reinforced;
+    aggregate.merged += result.merged;
+    aggregate.conflicts += result.conflicts;
+    aggregate.ignored += result.ignored;
+    aggregate.skipped += result.skipped;
+  }
+  return { runs, aggregate, failure, pendingAfter: getPendingConcretionStats(dbManager).events };
 }
 
 export function registerConcretionCommand(
