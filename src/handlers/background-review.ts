@@ -23,6 +23,25 @@ import { extractAndCaptureEvents } from "./event-extraction.js";
 import { runConcretion, shouldRunAutomaticConcretion } from "./concretion.js";
 import { REVIEW_COMPLETION_TIMEOUT_MS, runDirectMemoryCompletion, usesDirectTransport, type DirectReviewResult } from "./review-memory-ops.js";
 
+import { getActivePrinciples } from "../store/event-memory-store.js";
+
+/** Principles offered to the extractor for usage accounting: the in-force view
+ * for the current project, one compact line each. Capped so the index stays a
+ * small addition to the extraction prompt even for large principle sets. */
+const EXTRACTION_PRINCIPLE_INDEX_MAX = 60;
+
+function buildExtractionPrincipleIndex(dbManager: DatabaseManager, projectName: string | null): string[] {
+  try {
+    return getActivePrinciples(dbManager, projectName)
+      .slice(0, EXTRACTION_PRINCIPLE_INDEX_MAX)
+      .map((principle) => {
+        const project = principle.project ? `/${principle.project}` : "";
+        return `P${principle.id} [${principle.scope}${project}] ${principle.content.slice(0, 64)}`;
+      });
+  } catch {
+    return [];
+  }
+}
 import { resolveProjectName, resolveProjectStore, type ProjectNameRef, type ProjectStoreRef } from "../project-context.js";
 export interface BackgroundReviewOptions {
   ensureMemoryReady?: EnsureMemoryReady;
@@ -296,6 +315,10 @@ export function setupBackgroundReview(
             projectName: activeProjectName,
             source: "background-review",
             sourceSessionId,
+            // The principles that were in force during the episode, so the
+            // extractor can account which of them the work clearly followed
+            // or violated (usage signals feed principle strength).
+            principleIndex: buildExtractionPrincipleIndex(dbManager, activeProjectName),
           },
           { timeoutMs: REVIEW_COMPLETION_TIMEOUT_MS, signal: sessionAbort.signal },
         );

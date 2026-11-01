@@ -138,7 +138,6 @@ function concretionHealth(dbManager: DatabaseManager | null): ConcretionHealth |
     return null;
   }
 }
-
 function renderConcretionHealth(stats: ConcretionHealth | null): string[] {
   if (!stats || stats.total === 0) return [];
   const rate = Math.round((stats.failed / Math.max(1, stats.total)) * 100);
@@ -149,6 +148,29 @@ function renderConcretionHealth(stats: ConcretionHealth | null): string[] {
     lines.push(`  last failure (${(stats.lastFailureAt ?? "").slice(0, 10)}): ${usageExcerpt(stats.lastFailure)}`);
   }
   return lines;
+}
+
+/** One line on principle usage accounting: whether the follow/violation signal
+ * that drives principle strength is actually flowing. Zero signals after
+ * meaningful activity means the feedback wiring is broken again, and this line
+ * makes that visible instead of silently degrading to content-only ordering. */
+function renderFeedbackHealth(dbManager: DatabaseManager | null, stats: ConcretionHealth | null): string[] {
+  if (!dbManager) return [];
+  try {
+    const db = dbManager.getDb();
+    const row = db.prepare(
+      "SELECT COUNT(*) AS signals, MAX(last_feedback_at) AS lastAt FROM principles"
+      + " WHERE status = 'active' AND (applied_count > 0 OR violated_count > 0)",
+    ).get() as { signals: number | bigint; lastAt: string | null };
+    const signals = Number(row.signals ?? 0);
+    const lastAt = row.lastAt ?? "";
+    if (signals === 0) {
+      return [`  📐 FEEDBACK — no usage signals recorded yet${stats && stats.total > 0 ? " (reviews run; accounting may be mis-wired)" : ""}`];
+    }
+    return [`  📐 FEEDBACK — ${signals} principle(s) with follow/violation signals · last ${lastAt.slice(0, 10)}`];
+  } catch {
+    return [];
+  }
 }
 
 export function registerInsightsCommand(
@@ -243,9 +265,15 @@ export function registerInsightsCommand(
         lines.push("");
       }
 
-      const concretionLines = renderConcretionHealth(concretionHealth(dbManager));
+      const concretionStats = concretionHealth(dbManager);
+      const concretionLines = renderConcretionHealth(concretionStats);
       if (concretionLines.length > 0) {
         lines.push(...concretionLines);
+        lines.push("");
+      }
+      const feedbackLines = renderFeedbackHealth(dbManager, concretionStats);
+      if (feedbackLines.length > 0) {
+        lines.push(...feedbackLines);
         lines.push("");
       }
 

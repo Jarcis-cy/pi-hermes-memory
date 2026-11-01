@@ -67,3 +67,40 @@ describe("injection budget vs storage budget", () => {
     );
   });
 });
+
+describe("store budget sizing", () => {
+  let tmpDir: string;
+  let dbManager: DatabaseManager;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "budgets-sizing-"));
+    dbManager = new DatabaseManager(tmpDir);
+  });
+
+  afterEach(() => {
+    dbManager.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const add = (cid: string, content: string, charLimit: number) => {
+    const capture = captureMemoryEvents(dbManager, [{ scope: "global", kind: "insight", content: `${cid} evidence` }], {
+      captureId: cid, source: "manual",
+    });
+    const run = startConcretionRun(dbManager, "manual", 1);
+    return applyConcretionPlan(dbManager, run, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add", scope: "global", content, rationale: cid, sourceEventIds: capture.eventIds, existingPrincipleIds: [],
+    }], { charLimit });
+  };
+
+  it("defaults to a store budget sized for months of full-load distillation (200k, not 48k)", () => {
+    // Two days of real full-load work produced ~60k chars of distinct principles
+    // and re-deadlocked the layer at 48k. The default must clear that comfortably.
+    assert.equal(DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT, 200000);
+  });
+
+  it("admits a store far beyond the old 48k cap while still bounding growth at 200k", () => {
+    assert.equal(add("a", "x".repeat(30000), 200000).added, 1);
+    assert.equal(add("b", "y".repeat(30000), 200000).added, 1, "60k store is a normal mid-life state, not over capacity");
+    assert.equal(add("c", "z".repeat(150000), 200000).added, 0, "210k exceeds the store budget and becomes a conflict");
+  });
+});

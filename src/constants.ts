@@ -42,13 +42,21 @@ export const DEFAULT_PRINCIPLE_CHAR_LIMIT = 20000;
  * context, and it turns "not injected" into "visible by id" instead of invisible. */
 export const PRINCIPLE_INDEX_MAX_CHARS = 8000;
 /**
+/**
  * How much the principle LAYER may hold — separate from how much is injected per
  * run. Injection is an attention budget (small on purpose); storage is a curation
  * budget. Sharing one number deadlocked the layer: a store larger than the
  * injection budget rejected every new addition as "over capacity", even though
  * omission + index + cold recall make the gap the normal case.
+ *
+ * Sizing note: two days of full-load distillation produced ~60k characters of
+ * genuinely distinct principles, so a 48k cap filled in 48 hours and re-created
+ * the deadlock one level up. The cap exists only to stop unbounded growth, not
+ * to force curation; attention is governed by the injection budget. 200k is
+ * ~57k tokens of cold storage — far below the model's context — and at the
+ * observed rate buys roughly a year of headroom.
  */
-export const DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT = 48000;
+export const DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT = 200000;
 /** Summary width in the index. Wide enough to recognise a rule, narrow enough to
  * keep one line per principle. */
 export const PRINCIPLE_INDEX_SUMMARY_CHARS = 64;

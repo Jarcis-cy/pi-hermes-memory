@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildEventExtractionUserPrompt,
   parseEventExtractionResponse,
+  parsePrincipleFeedbackIds,
 } from "../../src/handlers/event-extraction.js";
 import { buildConcretionUserPrompt, parseConcretionResponse } from "../../src/handlers/concretion.js";
 
@@ -186,5 +187,91 @@ describe("concretion out-of-batch sanitization", () => {
     assert.equal(sanitized.length, 2);
     assert.deepEqual(sanitized[0]!.sourceEventIds, [11]);
     assert.equal(sanitized[1]!.action, "none");
+  });
+});
+
+describe("concretion merge suggestions", () => {
+  const principle = (id: number, content: string, scope: "global" | "user" = "global") => ({
+    id,
+    scope,
+    project: null,
+    content,
+    rationale: null,
+    sourceEventIds: [id],
+    status: "active" as const,
+    supersedesId: null,
+    createdAt: "2026-10-01",
+    updatedAt: "2026-10-01",
+  });
+
+  it("offers lexically near-duplicate pairs with both ids so the model can name merge targets", () => {
+    const principles = [
+      principle(1, "Back up the data before any bulk write to a datastore."),
+      principle(2, "Back up the data before any bulk write to a datastore table."),
+    ] as never;
+    const prompt = buildConcretionUserPrompt([], principles);
+    assert.match(prompt, /Pre-computed Merge Candidates/);
+    assert.match(prompt, /P1 ↔ P2/);
+    assert.match(prompt, /copy BOTH ids into existing_principle_ids/);
+  });
+
+  it("stays silent when nothing is near-duplicate", () => {
+    const principles = [
+      principle(1, "Back up the data before any bulk write to a datastore."),
+      principle(2, "Never rename an existing user-facing concept without asking first."),
+    ] as never;
+    assert.doesNotMatch(buildConcretionUserPrompt([], principles), /Merge Candidates/);
+  });
+
+  it("never pairs principles across scopes", () => {
+    const principles = [
+      principle(1, "Back up the data before any bulk write to a datastore.", "global"),
+      principle(2, "Back up the data before any bulk write to a datastore.", "user"),
+    ] as never;
+    assert.doesNotMatch(buildConcretionUserPrompt([], principles), /Merge Candidates/);
+  });
+});
+
+describe("extraction principle feedback", () => {
+  it("offers the principle index and feedback instructions only when supplied", () => {
+    const withIndex = buildEventExtractionUserPrompt({
+      parts: ["[USER] hi"],
+      projectName: null,
+      source: "background-review",
+      principleIndex: ["P1 [global] Back up data before any bulk write."],
+    });
+    assert.match(withIndex, /Active Principles \(for optional feedback\)/);
+    assert.match(withIndex, /P1 \[global\] Back up data before any bulk write\./);
+    assert.match(withIndex, /principle_feedback/);
+
+    const withoutIndex = buildEventExtractionUserPrompt({
+      parts: ["[USER] hi"],
+      projectName: null,
+      source: "background-review",
+    });
+    assert.doesNotMatch(withoutIndex, /Active Principles/);
+    assert.doesNotMatch(withoutIndex, /principle_feedback/);
+  });
+
+  it("keeps only offered ids and caps each class", () => {
+    const text = JSON.stringify({
+      events: [],
+      principle_feedback: {
+        applied: [1, 2, 2.5, 999, ...Array.from({ length: 25 }, () => 3)],
+        violated: [42],
+      },
+    });
+    const feedback = parsePrincipleFeedbackIds(text, new Set([1, 2, 3]));
+    assert.deepEqual(feedback.applied, [1, 2, ...Array.from({ length: 18 }, () => 3)]);
+    assert.deepEqual(feedback.violated, []);
+  });
+
+  it("returns empty accounting when the key is absent or malformed", () => {
+    assert.deepEqual(parsePrincipleFeedbackIds(JSON.stringify({ events: [] }), new Set([1])), { applied: [], violated: [] });
+    assert.deepEqual(parsePrincipleFeedbackIds("not json", new Set([1])), { applied: [], violated: [] });
+    assert.deepEqual(
+      parsePrincipleFeedbackIds(JSON.stringify({ events: [], principle_feedback: "nope" }), new Set([1])),
+      { applied: [], violated: [] },
+    );
   });
 });
