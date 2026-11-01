@@ -118,6 +118,17 @@ function parsePositiveIntegerArray(value: unknown): number[] | null {
   return [...new Set(parsed)];
 }
 
+/**
+ * Parse a concretion plan from a model response.
+ *
+ * Contract: returns null only when the response has no usable envelope (no
+ * JSON payload or no candidates array) — the caller then falls back to the
+ * other transport or fails the run. An INDIVIDUAL malformed candidate is
+ * dropped, not fatal: one bad apple in a six-candidate plan must not discard
+ * the five good ones (observed live: a single flawed candidate voided whole
+ * runs). Dropped candidates leave their events pending via the apply-stage
+ * coverage accounting, so they are retried, not lost.
+ */
 export function parseConcretionResponse(text: string): ConcretionCandidate[] | null {
   const payload = extractPayloadWithArrayKeys(text, ['candidates']);
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
@@ -125,25 +136,30 @@ export function parseConcretionResponse(text: string): ConcretionCandidate[] | n
   if (!Array.isArray(rawCandidates)) return null;
   const candidates: ConcretionCandidate[] = [];
   for (const raw of rawCandidates) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-    const item = raw as Record<string, unknown>;
-    const action = item.action as ConcretionCandidateAction;
-    if (!CANDIDATE_ACTIONS.has(action)) return null;
-    const sourceEventIds = parsePositiveIntegerArray(item.source_event_ids);
-    const existingPrincipleIds = parsePositiveIntegerArray(item.existing_principle_ids);
-    if (sourceEventIds === null || existingPrincipleIds === null || sourceEventIds.length === 0) return null;
-
-    const scope = SCOPES.has(item.scope as EventScope) ? item.scope as EventScope : undefined;
-    const content = typeof item.content === "string" ? item.content.trim() : undefined;
-    const rationale = typeof item.rationale === "string" ? item.rationale.trim() : undefined;
-    const conflictReason = typeof item.conflict_reason === "string" ? item.conflict_reason.trim() : undefined;
-    if (action === "reinforce" && existingPrincipleIds.length !== 1) return null;
-    if (action === "refine" && existingPrincipleIds.length !== 1) return null;
-    if (action !== "reinforce" && action !== "none" && (!scope || !content)) return null;
-
-    candidates.push({ action, scope, content, rationale, sourceEventIds, existingPrincipleIds, conflictReason });
+    const candidate = parseSingleCandidate(raw);
+    if (candidate) candidates.push(candidate);
   }
   return candidates;
+}
+
+function parseSingleCandidate(raw: unknown): ConcretionCandidate | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const item = raw as Record<string, unknown>;
+  const action = item.action as ConcretionCandidateAction;
+  if (!CANDIDATE_ACTIONS.has(action)) return null;
+  const sourceEventIds = parsePositiveIntegerArray(item.source_event_ids);
+  const existingPrincipleIds = parsePositiveIntegerArray(item.existing_principle_ids);
+  if (sourceEventIds === null || existingPrincipleIds === null || sourceEventIds.length === 0) return null;
+
+  const scope = SCOPES.has(item.scope as EventScope) ? item.scope as EventScope : undefined;
+  const content = typeof item.content === "string" ? item.content.trim() : undefined;
+  const rationale = typeof item.rationale === "string" ? item.rationale.trim() : undefined;
+  const conflictReason = typeof item.conflict_reason === "string" ? item.conflict_reason.trim() : undefined;
+  if (action === "reinforce" && existingPrincipleIds.length !== 1) return null;
+  if (action === "refine" && existingPrincipleIds.length !== 1) return null;
+  if (action !== "reinforce" && action !== "none" && (!scope || !content)) return null;
+
+  return { action, scope, content, rationale, sourceEventIds, existingPrincipleIds, conflictReason };
 }
 
 export function buildConcretionUserPrompt(

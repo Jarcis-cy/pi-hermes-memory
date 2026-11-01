@@ -79,7 +79,7 @@ describe("concretion protocol", () => {
     assert.equal(parsed?.[2].conflictReason, "Contradicts concise preference.");
   });
 
-  it("rejects malformed candidates instead of partially accepting a plan", () => {
+  it("drops malformed individual candidates but keeps the good ones", () => {
     const response = JSON.stringify({
       candidates: [
         {
@@ -96,15 +96,48 @@ describe("concretion protocol", () => {
           source_event_ids: [],
           existing_principle_ids: [],
         },
+        {
+          action: "refine",
+          scope: "global",
+          content: "Refine without exactly one target id.",
+          source_event_ids: [2],
+          existing_principle_ids: [],
+        },
       ],
     });
-    assert.equal(parseConcretionResponse(response), null);
+    const parsed = parseConcretionResponse(response);
+    assert.equal(parsed?.length, 1, "one flawed candidate must not void the good one");
+    assert.equal(parsed?.[0]?.content, "Valid-looking principle.");
+  });
+
+  it("extracts a fenced plan from a chatty response", () => {
+    const chatty = [
+      "I've analyzed the batch. Here is my reflection decision as JSON:",
+      "",
+      "```json",
+      JSON.stringify({
+        candidates: [{
+          action: "reinforce",
+          scope: "global",
+          content: "",
+          rationale: "same principle, new evidence",
+          source_event_ids: [7],
+          existing_principle_ids: [4],
+        }],
+      }),
+      "```",
+      "",
+      "Trailing explanation that is not JSON.",
+    ].join("\n");
+    const parsed = parseConcretionResponse(chatty);
+    assert.equal(parsed?.length, 1);
+    assert.equal(parsed?.[0]?.action, "reinforce");
   });
 
   it("returns an empty plan and rejects invalid envelopes", () => {
     assert.deepEqual(parseConcretionResponse('{"candidates":[]}'), []);
     assert.equal(parseConcretionResponse('{"events":[]}'), null);
-    assert.equal(parseConcretionResponse('{"candidates":[{"action":"bad","source_event_ids":[1],"existing_principle_ids":[]}]}'), null);
+    assert.deepEqual(parseConcretionResponse('{"candidates":[{"action":"bad","source_event_ids":[1],"existing_principle_ids":[]}]}'), [], "only-bad items drop to an empty plan, not a failed parse");
   });
 });
 
