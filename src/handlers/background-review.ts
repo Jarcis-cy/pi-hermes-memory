@@ -20,10 +20,10 @@ import type { EnsureMemoryReady } from "../memory-initialization.js";
 import { applyRecentMessageLimit, collectMessageParts } from "./message-parts.js";
 import { cleanChildStderr, execChildPrompt, resolveChildPiModel } from "./pi-child-process.js";
 import { extractAndCaptureEvents } from "./event-extraction.js";
-import { runConcretion, shouldRunAutomaticConcretion } from "./concretion.js";
+import { runConcretion, shouldRunAutomaticConcretion, drainConcretionQueue, CONCRETION_CATCHUP_MAX_RUNS, CONCRETION_BACKLOG_ALERT_THRESHOLD } from "./concretion.js";
 import { REVIEW_COMPLETION_TIMEOUT_MS, runDirectMemoryCompletion, usesDirectTransport, type DirectReviewResult } from "./review-memory-ops.js";
 
-import { getActivePrinciples } from "../store/event-memory-store.js";
+import { getActivePrinciples, getPendingConcretionStats } from "../store/event-memory-store.js";
 
 /** Principles offered to the extractor for usage accounting: the in-force view
  * for the current project, one compact line each. Capped so the index stays a
@@ -43,6 +43,7 @@ function buildExtractionPrincipleIndex(dbManager: DatabaseManager, projectName: 
   }
 }
 import { resolveProjectName, resolveProjectStore, type ProjectNameRef, type ProjectStoreRef } from "../project-context.js";
+
 export interface BackgroundReviewOptions {
   ensureMemoryReady?: EnsureMemoryReady;
   dbManager?: DatabaseManager | null;
@@ -329,28 +330,33 @@ export function setupBackgroundReview(
             "info",
           );
         }
-        if (
-          captured.inserted > 0
-          && options.globalDir
-          && shouldRunAutomaticConcretion(dbManager, config)
-        ) {
-          const result = await concretize(
-            pi,
-            ctx,
-            dbManager,
-            options.globalDir,
-            config,
-            "automatic",
-          );
-          if (!result.ok) {
-            // Silence here hid an ~80% failure rate for a long time; a failed
-            // distillation run must leave a visible trace in the session.
-            console.warn(`[pi-hermes-memory] Memory concretion failed: ${result.error ?? "no reason reported"}`);
-          }
-          if (result.ok && (result.added > 0 || result.refined > 0 || result.reinforced > 0 || result.conflicts > 0)) {
+        if (options.globalDir && shouldRunAutomaticConcretion(dbManager, config)) {
+          // Bounded catch-up (see drainConcretionQueue): a shock — failure
+          // storm, a deadlock era — can dump hundreds of events into the
+          // queue, while steady-state inflow only ever needs one batch per
+          // trigger. Keep distilling while the queue is over the trigger
+          // threshold, up to a hard per-review cap.
+          const drained = await drainConcretionQueue(pi, ctx, dbManager, options.globalDir, config, {
+            isCancelled: sessionCancelled,
+            onRunError: (error) => {
+              // Silence here hid an ~80% failure rate for a long time; a
+              // failed distillation run must leave a visible trace.
+              console.warn(`[pi-hermes-memory] Memory concretion failed: ${error}`);
+            },
+          });
+          const { aggregate } = drained;
+          if (aggregate.added > 0 || aggregate.refined > 0 || aggregate.reinforced > 0 || aggregate.conflicts > 0) {
             ctx.ui.notify(
-              `🧠 Memory concretion: ${result.added} added, ${result.refined} refined, ${result.reinforced} reinforced, ${result.merged} merged, ${result.conflicts} conflict${result.conflicts === 1 ? "" : "s"}, ${result.ignored} no-action, ${result.skipped} skipped`,
-              result.conflicts > 0 ? "warning" : "info",
+              `🧠 Memory concretion: ${aggregate.added} added, ${aggregate.refined} refined, ${aggregate.reinforced} reinforced, ${aggregate.merged} merged, ${aggregate.conflicts} conflict${aggregate.conflicts === 1 ? "" : "s"}, ${aggregate.ignored} no-action, ${aggregate.skipped} skipped`,
+              aggregate.conflicts > 0 ? "warning" : "info",
+            );
+          }
+          // Backlog alert: the user must hear about a queue that stays deep
+          // even after catch-up, instead of discovering it days later.
+          if (drained.pendingAfter >= CONCRETION_BACKLOG_ALERT_THRESHOLD) {
+            ctx.ui.notify(
+              `🧠 Distillation backlog is still ${drained.pendingAfter} events (catch-up cap ${CONCRETION_CATCHUP_MAX_RUNS} runs/review reached) — it will keep draining on later reviews.`,
+              "warning",
             );
           }
         }
