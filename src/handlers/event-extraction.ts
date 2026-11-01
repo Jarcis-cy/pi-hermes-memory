@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { DatabaseManager } from "../store/db.js";
 import {
   captureMemoryEvents,
+  recordPrincipleFeedback,
   type CaptureEventsResult,
   type EventKind,
   type EventScope,
@@ -9,7 +10,7 @@ import {
   type MemoryEventDraft,
 } from "../store/event-memory-store.js";
 import type { MemoryConfig } from "../types.js";
-import { execChildPrompt } from "./pi-child-process.js";
+import { execChildPrompt, cleanChildStderr } from "./pi-child-process.js";
 import {
   extractPayloadWithArrayKeys,
   runDirectJsonCompletion,
@@ -65,6 +66,11 @@ export interface EventExtractionInput {
   sourceSessionId?: string | null;
   captureId?: string;
   occurredAt?: string;
+  /** Compact "P<id> [scope] summary" lines for the principles that were in
+   * force during the episode. When present, the extractor may report which of
+   * them the conversation clearly followed or violated; ids are validated
+   * against this list before recording. */
+  principleIndex?: string[];
 }
 
 export interface EventCaptureResult extends CaptureEventsResult {
@@ -99,13 +105,55 @@ export function parseEventExtractionResponse(text: string): MemoryEventDraft[] |
 }
 
 export function buildEventExtractionUserPrompt(input: EventExtractionInput): string {
+  const feedbackSection = input.principleIndex?.length
+    ? [
+      "",
+      "--- Active Principles (for optional feedback) ---",
+      "The agent operated under these principles during the episode:",
+      ...input.principleIndex.map((line) => `- ${line}`),
+      "If the conversation clearly shows one of the ABOVE principles being followed",
+      "(applied) or clearly ignored/contradicted (violated), include an extra key in",
+      'your JSON: "principle_feedback": {"applied": [ids], "violated": [ids]}.',
+      "Use only ids from the list above, only what is clearly observable, and omit",
+      "the key entirely when nothing is clear.",
+    ]
+    : [];
   return [
     `Source: ${input.source}`,
     `Active project: ${input.projectName?.trim() || "(none)"}`,
     "",
     "--- Conversation Episode ---",
     input.parts.join("\n\n"),
+    ...feedbackSection,
   ].join("\n");
+}
+
+/** Cap per feedback class, mirroring the review-path accounting: a reviewer
+ * that lists dozens of ids is guessing, not observing. */
+const FEEDBACK_IDS_PER_CLASS = 20;
+
+/**
+ * Parse principle_feedback from an extraction response, restricted to the ids
+ * the prompt actually offered.
+ *
+ * Contract: never invents ids — anything not in `allowedIds` is dropped, so a
+ * hallucinated id cannot pollute the strength accounting. Returns empty lists
+ * when the key is absent or malformed; feedback problems never fail extraction.
+ */
+export function parsePrincipleFeedbackIds(
+  text: string,
+  allowedIds: Set<number>,
+): { applied: number[]; violated: number[] } {
+  const payload = extractPayloadWithArrayKeys(text, ['events']);
+  const raw = (payload as { principle_feedback?: unknown } | null)?.principle_feedback;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { applied: [], violated: [] };
+  const record = raw as { applied?: unknown; violated?: unknown };
+  const read = (value: unknown): number[] =>
+    (Array.isArray(value) ? value : [])
+      .map(Number)
+      .filter((id) => Number.isSafeInteger(id) && allowedIds.has(id))
+      .slice(0, FEEDBACK_IDS_PER_CLASS);
+  return { applied: read(record.applied), violated: read(record.violated) };
 }
 
 function emptyCapture(captureId = ""): CaptureEventsResult {
@@ -136,6 +184,7 @@ export async function extractAndCaptureEvents(
   const timeoutMs = options.timeoutMs ?? 120000;
   let drafts: MemoryEventDraft[] | null = null;
   let transport: "direct" | "subprocess" | undefined;
+  let rawText: string | undefined;
 
   if (usesDirectTransport(config)) {
     try {
@@ -148,7 +197,10 @@ export async function extractAndCaptureEvents(
       });
       if (direct.ok) {
         drafts = parseEventExtractionResponse(direct.text);
-        if (drafts !== null) transport = "direct";
+        if (drafts !== null) {
+          transport = "direct";
+          rawText = direct.text;
+        }
       }
     } catch {
       // Fall through to the isolated subprocess path.
@@ -163,10 +215,11 @@ export async function extractAndCaptureEvents(
         jsonOnly: true,
       });
       if (child.code !== 0) {
+        const stderrDetail = cleanChildStderr(child.stderr);
         return {
           ...emptyCapture(input.captureId),
           ok: false,
-          error: `Event extraction subprocess exited with code ${child.code}.`,
+          error: `Event extraction subprocess exited with code ${child.code}${stderrDetail ? `: ${stderrDetail}` : "."}`,
         };
       }
       drafts = parseEventExtractionResponse(child.stdout ?? "");
@@ -178,6 +231,7 @@ export async function extractAndCaptureEvents(
         };
       }
       transport = "subprocess";
+      rawText = child.stdout ?? "";
     } catch (error) {
       return {
         ...emptyCapture(input.captureId),
@@ -187,6 +241,7 @@ export async function extractAndCaptureEvents(
     }
   }
 
+
   try {
     const captured = captureMemoryEvents(dbManager, drafts, {
       captureId: input.captureId,
@@ -195,6 +250,26 @@ export async function extractAndCaptureEvents(
       sourceSessionId: input.sourceSessionId,
       occurredAt: input.occurredAt,
     });
+    // Principle usage accounting rides on the same model call, AFTER the
+    // capture committed: if capture fails the episode stays pending and will
+    // be re-extracted, so recording feedback first would double-count on the
+    // retry. Best-effort by design — a feedback hiccup must never lose events.
+    if (input.principleIndex?.length && rawText) {
+      try {
+        const allowed = new Set(
+          input.principleIndex
+            .map((line) => /^P(\d+)\s/.exec(line.trim())?.[1])
+            .filter((id): id is string => Boolean(id))
+            .map(Number),
+        );
+        const feedback = parsePrincipleFeedbackIds(rawText, allowed);
+        if (feedback.applied.length || feedback.violated.length) {
+          recordPrincipleFeedback(dbManager, feedback);
+        }
+      } catch {
+        // ignored on purpose
+      }
+    }
     return { ...captured, ok: true, transport };
   } catch (error) {
     return {

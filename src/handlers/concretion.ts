@@ -17,8 +17,9 @@ import {
   type EventScope,
 } from "../store/event-memory-store.js";
 import { DEFAULT_PRINCIPLE_CHAR_LIMIT, DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT, PRINCIPLES_FILE } from "../constants.js";
+import { tokenizeForMatch } from "../store/text-similarity.js";
 import type { MemoryConfig } from "../types.js";
-import { execChildPrompt } from "./pi-child-process.js";
+import { execChildPrompt, cleanChildStderr } from "./pi-child-process.js";
 import {
   extractPayloadWithArrayKeys,
   runDirectJsonCompletion,
@@ -189,12 +190,23 @@ export function buildConcretionUserPrompt(
       );
     }
   }
+  const mergeLines = suggestMergePairs(principles);
   return [
     "--- Pending Events (JSONL) ---",
     ...eventLines,
     "",
     "--- Active Principles (JSONL) ---",
     ...(principleLines.length ? principleLines : ["(none)"]),
+    ...(mergeLines.length
+      ? [
+        "",
+        "--- Pre-computed Merge Candidates ---",
+        "These pairs of active principles are lexically the most alike (the system computed",
+        "them for you). To merge a pair, copy BOTH ids into existing_principle_ids of a merge",
+        "candidate; never invent ids, and never merge principles that govern different rules.",
+        ...mergeLines,
+      ]
+      : []),
     ...(budgetLines.length ? ["", "--- Principle Budget ---", ...budgetLines] : []),
     ...(signalLines.length
       ? [
@@ -207,6 +219,56 @@ export function buildConcretionUserPrompt(
       ]
       : []),
   ].join("\n");
+}
+
+/** Minimum lexical similarity for a pair to be offered as a merge candidate. */
+export const MERGE_SUGGESTION_MIN_SIMILARITY = 0.5;
+/** At most this many suggested pairs per prompt: enough to act on, small enough
+ * not to crowd out events in the batch. */
+export const MERGE_SUGGESTION_MAX_PAIRS = 8;
+
+/**
+ * Pre-computed near-duplicate pairs for the concretion prompt.
+ *
+ * Contract: pure function over the supplied principle list; touches no storage.
+ * The model repeatedly failed to name merge targets on its own (30 malformed
+ * merge attempts in two days), so the ids it needs are supplied instead of
+ * inferred. Only same-scope pairs are offered — a merge must stay in scope —
+ * and pairs are ranked by Jaccard similarity over the same tokenizer the
+ * rest of the system uses.
+ */
+export function suggestMergePairs(
+  principles: ReturnType<typeof getAllActivePrinciples>,
+): string[] {
+  if (principles.length < 2) return [];
+  const tokens = new Map<number, Set<string>>();
+  for (const principle of principles) {
+    tokens.set(principle.id, new Set(tokenizeForMatch(principle.content)));
+  }
+  const pairs: Array<{ a: number; b: number; similarity: number; text: string }> = [];
+  for (let i = 0; i < principles.length; i++) {
+    for (let j = i + 1; j < principles.length; j++) {
+      const left = principles[i]!;
+      const right = principles[j]!;
+      if (left.scope !== right.scope) continue;
+      if (left.scope === "project" && left.project !== right.project) continue;
+      const a = tokens.get(left.id)!;
+      const b = tokens.get(right.id)!;
+      if (a.size === 0 || b.size === 0) continue;
+      let shared = 0;
+      for (const token of a) if (b.has(token)) shared++;
+      const similarity = shared / (a.size + b.size - shared);
+      if (similarity < MERGE_SUGGESTION_MIN_SIMILARITY) continue;
+      pairs.push({
+        a: left.id,
+        b: right.id,
+        similarity,
+        text: `- P${left.id} ↔ P${right.id} (${similarity.toFixed(2)}): ${left.content.slice(0, 60)} … | ${right.content.slice(0, 60)} …`,
+      });
+    }
+  }
+  pairs.sort((x, y) => y.similarity - x.similarity);
+  return pairs.slice(0, MERGE_SUGGESTION_MAX_PAIRS).map((pair) => pair.text);
 }
 
 function emptyResult(overrides: Partial<ConcretionResult> = {}): ConcretionResult {
@@ -248,8 +310,13 @@ export async function runConcretion(
       completePrinciples,
       getPrincipleUsageSignals(dbManager),
       {
+        // The budget note must speak about the STORE limit: the model decides
+        // adds/merges against storage capacity, not the per-run injection
+        // budget. Feeding it the injection limit made every run after the
+        // store crossed 16k beg for merges the model could not name targets
+        // for (30 malformed merge attempts in two days).
         used: completePrinciples.reduce((sum, principle) => sum + principle.content.length, 0),
-        limit: principleCharLimit,
+        limit: storeCharLimit,
       },
     );
     const runDirect = deps.runDirectJsonCompletion ?? runDirectJsonCompletion;
@@ -285,7 +352,14 @@ export async function runConcretion(
         config,
         { timeoutMs: config.consolidationTimeoutMs, jsonOnly: true },
       );
-      if (child.code !== 0) throw new Error(`Concretion subprocess exited with code ${child.code}.`);
+      if (child.code !== 0) {
+        // Surface the child's own stderr: "exited with code 1" alone hid the
+        // real cause (provider errors, auth, config) for 22 runs in two days.
+        const detail = cleanChildStderr(child.stderr);
+        throw new Error(
+          `Concretion subprocess exited with code ${child.code}${detail ? `: ${detail}` : "."}`,
+        );
+      }
       candidates = parseConcretionResponse(child.stdout ?? "");
       if (candidates === null) {
         const excerpt = (child.stdout ?? "").replace(/\s+/g, " ").trim().slice(0, 400) || directParseExcerpt || "(empty)";

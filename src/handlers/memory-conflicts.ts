@@ -10,6 +10,7 @@ import {
   writePrinciplesSnapshot,
   type PrincipleConflict,
 } from "../store/event-memory-store.js";
+import { tokenSetSimilarity } from "../store/text-similarity.js";
 
 export function formatPrincipleConflicts(
   dbManager: DatabaseManager,
@@ -27,16 +28,32 @@ export function formatPrincipleConflicts(
       `Reason: ${conflict.reason}`,
       "Existing active principle(s):",
     );
-
     if (conflict.conflictingPrincipleIds.length === 0) {
       lines.push("  (none; this may be a scope, validation, or capacity decision)");
+      // Merge-misuse and capacity conflicts carry no opposing ids, which left
+      // the human staring at a candidate with no idea what it could merge
+      // with or duplicate. Show the lexically nearest active principles so a
+      // merge/duplicate decision can be made at a glance.
+      const nearest = [...principleById.values()]
+        .map((principle) => ({
+          principle,
+          similarity: tokenSetSimilarity(conflict.candidateContent, principle.content),
+        }))
+        .filter((entry) => entry.similarity >= 0.3)
+        .sort((x, y) => y.similarity - x.similarity)
+        .slice(0, 3);
+      if (nearest.length) {
+        lines.push("Nearest active principle(s):");
+        for (const entry of nearest) {
+          lines.push(`  P${entry.principle.id} (${entry.similarity.toFixed(2)}): ${entry.principle.content.slice(0, 100)}`);
+        }
+      }
     } else {
       for (const id of conflict.conflictingPrincipleIds) {
         const principle = principleById.get(id);
         lines.push(`  P${id}: ${principle?.content ?? "(principle is no longer active)"}`);
       }
     }
-
     lines.push("Source event(s):");
     for (const id of conflict.sourceEventIds) {
       const event = getEventById(dbManager, id);

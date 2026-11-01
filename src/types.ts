@@ -148,7 +148,7 @@ export interface MemoryConfig {
    * omitted from the prompt but listed in the discoverability index and remain
    * recallable, so this is an attention budget, not a storage cap. */
   principleCharLimit?: number;
-  /** Maximum characters the principle layer may HOLD. Default: 48000. Keeping
+  /** Maximum characters the principle layer may HOLD. Default: 200000. Keeping
    * this above `principleCharLimit` is what stops a curated layer from deadlocking:
    * a store larger than the injection budget is normal once omission exists. */
   principleStoreCharLimit?: number;
