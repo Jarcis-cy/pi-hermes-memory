@@ -308,3 +308,15 @@ describe("extraction principle feedback", () => {
     );
   });
 });
+
+describe("principle feedback id forms", () => {
+  it("accepts the display form P<id> as well as bare numbers, drops unknowns", () => {
+    const text = JSON.stringify({
+      events: [],
+      principle_feedback: { applied: ["P304", 221, "p306", "P999", "not-an-id"], violated: ["P221"] },
+    });
+    const feedback = parsePrincipleFeedbackIds(text, new Set([304, 221, 306]));
+    assert.deepEqual(feedback.applied, [304, 221, 306]);
+    assert.deepEqual(feedback.violated, [221]);
+  });
+});

@@ -148,10 +148,21 @@ export function parsePrincipleFeedbackIds(
   const raw = (payload as { principle_feedback?: unknown } | null)?.principle_feedback;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { applied: [], violated: [] };
   const record = raw as { applied?: unknown; violated?: unknown };
+  // The prompt shows ids as "P<id>"; models naturally echo that display form
+  // ("P304") instead of a bare number. Accept both — Number("P304") is NaN and
+  // silently discarded every real feedback report (observed live: the probe
+  // response carried applied:["P304"] and the accounting stayed zero).
+  const readId = (value: unknown): number | null => {
+    if (typeof value === "string") {
+      const match = /^P(\d+)$/i.exec(value.trim());
+      return match ? Number(match[1]) : null;
+    }
+    return Number.isSafeInteger(value) ? (value as number) : null;
+  };
   const read = (value: unknown): number[] =>
     (Array.isArray(value) ? value : [])
-      .map(Number)
-      .filter((id) => Number.isSafeInteger(id) && allowedIds.has(id))
+      .map(readId)
+      .filter((id): id is number => id !== null && allowedIds.has(id))
       .slice(0, FEEDBACK_IDS_PER_CLASS);
   return { applied: read(record.applied), violated: read(record.violated) };
 }

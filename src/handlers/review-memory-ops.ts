@@ -575,8 +575,16 @@ export function parsePrincipleFeedback(text: string): { applied: number[]; viola
   const raw = payload?.principle_feedback;
   const read = (value: unknown): number[] => {
     if (!Array.isArray(value)) return [];
+    // Models echo the display form "P<id>" (observed live); accept it too.
     const ids = value
-      .map((id) => (typeof id === "number" ? id : typeof id === "string" ? Number(id) : Number.NaN))
+      .map((id) => {
+        if (typeof id === "number") return id;
+        if (typeof id === "string") {
+          const match = /^P(\d+)$/i.exec(id.trim());
+          return match ? Number(match[1]) : Number(id);
+        }
+        return Number.NaN;
+      })
       .filter((id) => Number.isSafeInteger(id) && id > 0);
     return [...new Set(ids)].slice(0, MAX_FEEDBACK_IDS);
   };
