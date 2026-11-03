@@ -47,6 +47,7 @@ import { registerInsightsCommand } from "./handlers/insights.js";
 import { triggerConsolidation, registerConsolidateCommand } from "./handlers/auto-consolidate.js";
 import { setupCorrectionDetector } from "./handlers/correction-detector.js";
 import { registerSkillsCommand } from "./handlers/skills-command.js";
+import { registerExpertCommand, expertPathsFor } from "./handlers/expert.js";
 import { registerInterviewCommand } from "./handlers/interview.js";
 import { registerSwitchProjectCommand } from "./handlers/switch-project.js";
 import { registerIndexSessionsCommand } from "./handlers/index-sessions.js";
@@ -424,6 +425,7 @@ export default function (pi: ExtensionAPI) {
   registerPrinciplePinCommand(memoryPi, dbManager, projectNameRef);
   registerPrincipleRetireCommand(memoryPi, dbManager, projectNameRef);
   registerSkillsCommand(pi, skillStore);
+  registerExpertCommand(memoryPi, expertPathsFor(agentRoot, config.expertBaseDir), dbManager);
   registerInterviewCommand(memoryPi, store);
   registerSwitchProjectCommand(pi, config);
   registerLearnMemoryCommand(pi);

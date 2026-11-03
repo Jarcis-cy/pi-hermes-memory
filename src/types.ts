@@ -152,6 +152,9 @@ export interface MemoryConfig {
    * this above `principleCharLimit` is what stops a curated layer from deadlocking:
    * a store larger than the injection budget is normal once omission exists. */
   principleStoreCharLimit?: number;
+  /** Base directory for /expert scaffolds. Default: <agentRoot>/experts */
+  expertBaseDir?: string;
+
   /** Inject accepted adaptive principles into every agent run. Default: true */
   principleInjectionEnabled?: boolean;
 }
