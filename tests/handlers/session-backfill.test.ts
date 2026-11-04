@@ -141,6 +141,81 @@ describe('session backfill handler', () => {
     assert.match(notifications[0].message, /startup limit reached/);
   });
 
+  it('keeps a healthy routine backfill off the UI notify channel (console trace only)', async () => {
+    const state: SessionBackfillState = { inProgress: false, promise: null };
+    const notifications: { message: string; level: string }[] = [];
+    const infos: string[] = [];
+    const originalInfo = console.info;
+    console.info = (message?: unknown) => { infos.push(String(message)); };
+
+    try {
+      const scheduled = scheduleSessionBackfill(dbManager, sessionsDir, {
+        state,
+        needsBackfillFn: () => true,
+        // The everyday shape: one changed file (the live session), every
+        // already-indexed file skipped, nothing wrong.
+        indexSessionsFn: () => ({
+          sessionsProcessed: 1,
+          sessionsIndexed: 1,
+          sessionsSkipped: 357,
+          messagesIndexed: 42,
+          errors: [],
+          reachedLimit: false,
+        }),
+        notify: (message, level) => notifications.push({ message, level }),
+        setTimeoutFn: (callback) => {
+          queueMicrotask(callback);
+          return 0;
+        },
+      });
+
+      assert.equal(scheduled, true);
+      await state.promise;
+      assert.equal(notifications.length, 0, 'healthy routine pass must not reach the UI notify channel');
+      assert.equal(infos.length, 1, 'healthy routine pass still leaves one console trace');
+      assert.match(infos[0]!, /Session backfill complete/);
+    } finally {
+      console.info = originalInfo;
+    }
+  });
+
+  it('still notifies (info) when a healthy pass indexes more than the quiet threshold', async () => {
+    const state: SessionBackfillState = { inProgress: false, promise: null };
+    const notifications: { message: string; level: string }[] = [];
+    const infos: string[] = [];
+    const originalInfo = console.info;
+    console.info = (message?: unknown) => { infos.push(String(message)); };
+
+    try {
+      const scheduled = scheduleSessionBackfill(dbManager, sessionsDir, {
+        state,
+        needsBackfillFn: () => true,
+        indexSessionsFn: () => ({
+          sessionsProcessed: 11,
+          sessionsIndexed: 11,
+          sessionsSkipped: 0,
+          messagesIndexed: 120,
+          errors: [],
+          reachedLimit: false,
+        }),
+        notify: (message, level) => notifications.push({ message, level }),
+        setTimeoutFn: (callback) => {
+          queueMicrotask(callback);
+          return 0;
+        },
+      });
+
+      assert.equal(scheduled, true);
+      await state.promise;
+      assert.equal(notifications.length, 1, 'a large catch-up batch still reaches the UI notify channel');
+      assert.equal(notifications[0].level, 'info');
+      assert.match(notifications[0].message, /11 indexed/);
+      assert.equal(infos.length, 0);
+    } finally {
+      console.info = originalInfo;
+    }
+  });
+
   it('scheduled task is best-effort and does not reject when indexing throws', async () => {
     const state: SessionBackfillState = { inProgress: false, promise: null };
     const notifications: { message: string; level: string }[] = [];

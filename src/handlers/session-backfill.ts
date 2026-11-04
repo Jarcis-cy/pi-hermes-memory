@@ -10,6 +10,16 @@ import {
 export const SESSION_BACKFILL_SHUTDOWN_TIMEOUT_MS = 5000;
 export const SESSION_BACKFILL_MAX_FILES = 50;
 
+
+/**
+ * Routine startups index only a session or two while re-skipping every
+ * already-indexed file, so a per-run UI notice is noise the user learns to
+ * ignore (the skip count also grows without bound as sessions accumulate).
+ * Healthy passes at or below this indexed-session count stay console-only;
+ * errors, the startup cap, or larger catches still surface through the UI
+ * notify channel.
+ */
+const BACKFILL_UI_NOTICE_INDEXED_THRESHOLD = 10;
 type NotifyLevel = 'info' | 'warning' | 'error';
 type NotifyFn = (message: string, level: NotifyLevel) => void;
 
@@ -104,7 +114,13 @@ export function scheduleSessionBackfill(
         try {
           const result = indexSessionsFn(dbManager, sessionsDir, { maxFilesToIndex, retentionCutoffMs });
           if (!result.reachedLimit) touchBackfillTimestampFn(dbManager);
-          notifyBestEffort(options.notify, formatBackfillResult(result), result.errors.length > 0 || result.reachedLimit ? 'warning' : 'info');
+          const failed = result.errors.length > 0 || result.reachedLimit;
+          if (failed || result.sessionsIndexed > BACKFILL_UI_NOTICE_INDEXED_THRESHOLD) {
+            notifyBestEffort(options.notify, formatBackfillResult(result), failed ? 'warning' : 'info');
+          } else {
+            // Healthy routine pass: leave a console trace without a UI toast.
+            console.info(formatBackfillResult(result));
+          }
         } catch (err) {
           notifyBestEffort(
             options.notify,
