@@ -80,8 +80,14 @@ function projectStateTemplate(name: string): string {
 }
 
 function agentDefinition(name: string, description: string, expertDir: string): string {
+  // The Chinese display name is the description's leading segment before the
+  // first colon ("存储治理：..."), quoted so multi-line values can never
+  // break the YAML frontmatter (observed: an unquoted wrapped description
+  // silently killed display_name parsing).
+  const display = description.split(/[：:]/)[0]!.trim().slice(0, 24) || name;
   return [
     "---",
+    `display_name: "${display.replace(/"/g, "")}"`,
     `name: ${name}`,
     `description: ${description}（领域专家，工作目录 ${expertDir}）`,
     "tools: read, grep, find, ls, bash",

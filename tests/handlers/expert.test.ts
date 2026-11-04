@@ -97,3 +97,14 @@ describe("expert scaffolding", () => {
     assert.match(expertStatus(paths, "missing"), /没有专家/);
   });
 });
+
+describe("expert display names", () => {
+  it("derives a quoted Chinese display name from the description's leading segment", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "expert-dn-"));
+    const paths = expertPathsFor(root);
+    const result = createExpert(paths, "demo", "测试治理：code-audit 的门禁与 flaky");
+    const agent = fs.readFileSync(result.agentPath!, "utf-8");
+    assert.match(agent, /^display_name: "测试治理"$/m);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+});
