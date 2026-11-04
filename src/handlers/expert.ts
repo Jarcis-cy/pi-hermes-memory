@@ -42,30 +42,29 @@ function charter(name: string, description: string): string {
     `# ${name} 专家`,
     "",
     `> 领域：${description}`,
-    "> 本文件是你的身份底座，在此目录工作的会话每轮自动加载它。",
+    "> 本文件是身份底座，在此目录工作的会话每轮自动加载它。",
+    "",
+    "## 记忆分两层",
+    "- **手艺（CRAFT.md，本目录）**：跨项目的经验蒸馏，到哪儿都带着。",
+    "- **项目层（projects/<本项目>/）**：本项目名 = 当前工作目录名。开工先读",
+    "  `projects/<本项目>/STATE.md`——不存在就初始化一套（STATE/LOG/DECISIONS/refs）。",
+    "  换了项目目录，自动用另一套，绝不混。",
     "",
     "## 三条铁律",
-    "1. 开工先读 `STATE.md`（当前状态，一页）。",
-    "2. 收工更新 `STATE.md`，并往 `LOG.md` 追加一行（日期 + 做了什么 + 结论）。",
-    `3. \`STATE.md\` 接近 ${STATE_SOFT_CAP_LINES} 行时，提醒用户决策哪些内容合并或淘汰——不自行丢弃。`,
+    "1. 开工先读本项目 STATE.md（当前状态，一页）。",
+    "2. 收工更新本项目 `STATE.md`，往本项目 `LOG.md` 追加一行（日期 + 做了什么 + 结论）；",
+    "   其中可跨项目复用的经验，另起一行记入 `CRAFT.md`（标注来源项目）。",
+    `3. 本项目 \`STATE.md\` 接近 ${STATE_SOFT_CAP_LINES} 行时，提醒用户决策合并或淘汰——不自行丢弃。`,
     "",
     "## 工作方式",
     "- 汇报：大白话中文，先结论；用户追问再展开细节。",
-    "- 细节与依据在 `refs/`、`LOG.md`，以及群记忆（memory_search 可检索本领域沉淀）。",
-    "- 决策类结论写进 `DECISIONS.md`，每条带来源（LOG 日期或任务编号）。",
-    "",
-    "## 记忆文件",
-    "| 文件 | 作用 |",
-    "|---|---|",
-    "| `STATE.md` | 当前状态，每次必读，收工更新 |",
-    "| `LOG.md` | 流水账，只追加，永不注入 |",
-    "| `DECISIONS.md` | 蒸馏出的决策与理由，带来源 |",
-    "| `refs/` | 详细报告与数据，按需读 |",
+    "- 细节与依据在本项目 `refs/`、本项目 `LOG.md`，以及群记忆（memory_search 可检索）。",
+    "- 本项目的决策类结论写进本项目 `DECISIONS.md`，每条带来源。",
     "",
   ].join("\n");
 }
 
-function stateTemplate(name: string): string {
+function projectStateTemplate(name: string): string {
   return [
     `# ${name} 当前状态`,
     "",
@@ -132,10 +131,8 @@ export function createExpert(paths: ExpertPaths, name: string, description: stri
   }
   const created: string[] = [];
   if (writeFileIfMissing(path.join(expertDir, "AGENTS.md"), charter(name, description))) created.push("AGENTS.md");
-  if (writeFileIfMissing(path.join(expertDir, "STATE.md"), stateTemplate(name))) created.push("STATE.md");
-  if (writeFileIfMissing(path.join(expertDir, "LOG.md"), `# ${name} 流水账（追加式，一条一行：日期 + 做了什么 + 结论）\n\n`)) created.push("LOG.md");
-  if (writeFileIfMissing(path.join(expertDir, "DECISIONS.md"), `# ${name} 决策记录（蒸馏自 LOG；每条带来源）\n\n`)) created.push("DECISIONS.md");
-  if (writeFileIfMissing(path.join(expertDir, "refs", ".gitkeep"), "")) created.push("refs/");
+  if (writeFileIfMissing(path.join(expertDir, "CRAFT.md"), `# ${name} 手艺（跨项目经验，蒸馏自各项目；每条一行并标注来源项目）\n\n`)) created.push("CRAFT.md");
+  if (writeFileIfMissing(path.join(expertDir, "projects", ".gitkeep"), "")) created.push("projects/");
   if (writeFileIfMissing(agentPath, agentDefinition(name, description, expertDir))) created.push("agents 定义");
   return {
     ok: true,
@@ -143,6 +140,18 @@ export function createExpert(paths: ExpertPaths, name: string, description: stri
     expertDir,
     agentPath,
   };
+}
+
+
+/** Per-project memory set under projects/<name>/; created on demand by the
+ * expert itself (charter rule) or via this helper. Never mixes projects. */
+export function ensureProjectZone(expertDir: string, projectName: string, expertName: string): string {
+  const zone = path.join(expertDir, "projects", projectName);
+  writeFileIfMissing(path.join(zone, "STATE.md"), projectStateTemplate(expertName));
+  writeFileIfMissing(path.join(zone, "LOG.md"), `# ${projectName} 流水账（追加式，一条一行：日期 + 做了什么 + 结论）\n\n`);
+  writeFileIfMissing(path.join(zone, "DECISIONS.md"), `# ${projectName} 决策记录（带来源）\n\n`);
+  writeFileIfMissing(path.join(zone, "refs", ".gitkeep"), "");
+  return zone;
 }
 
 export function listExperts(paths: ExpertPaths): string {
@@ -155,10 +164,15 @@ export function listExperts(paths: ExpertPaths): string {
   if (!entries.length) return "（尚无专家）";
   const lines = ["已就绪的领域专家："];
   for (const name of entries) {
-    const statePath = path.join(paths.expertBaseDir, name, "STATE.md");
-    const stateLines = fs.existsSync(statePath) ? fs.readFileSync(statePath, "utf-8").split("\n").length : 0;
-    const fill = Math.min(100, Math.round((stateLines / STATE_SOFT_CAP_LINES) * 100));
-    lines.push(`  · ${name}（STATE ${fill}%${fill >= 90 ? " ⚠️ 接近上限" : ""}）`);
+    const dir = path.join(paths.expertBaseDir, name);
+    const projectsDir = path.join(dir, "projects");
+    const projects = fs.existsSync(projectsDir)
+      ? fs.readdirSync(projectsDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
+      : [];
+    const craft = fs.existsSync(path.join(dir, "CRAFT.md"))
+      ? fs.readFileSync(path.join(dir, "CRAFT.md"), "utf-8").split("\n").filter((l) => l.startsWith("- ")).length
+      : 0;
+    lines.push(`  · ${name}（手艺 ${craft} 条 · 项目层：${projects.length ? projects.join("、") : "（未开张）"}）`);
   }
   return lines.join("\n");
 }
@@ -169,20 +183,31 @@ export function expertStatus(paths: ExpertPaths, name: string): string {
   if (!fs.existsSync(path.join(expertDir, "AGENTS.md"))) {
     return `没有专家 ${name}（目录不存在）。`;
   }
-  const describe = (file: string): string => {
-    const filePath = path.join(expertDir, file);
-    if (!fs.existsSync(filePath)) return `${file}: 缺失`;
-    const lines = fs.readFileSync(filePath, "utf-8").split("\n").length;
-    return `${file}: ${lines} 行`;
-  };
+  const lines = [`专家 ${name}`, `  目录: ${expertDir}`];
+  const craftPath = path.join(expertDir, "CRAFT.md");
+  if (fs.existsSync(craftPath)) {
+    const craft = fs.readFileSync(craftPath, "utf-8").split("\n").filter((l) => l.startsWith("- ")).length;
+    lines.push(`  手艺（跨项目）: ${craft} 条`);
+  }
+  const projectsDir = path.join(expertDir, "projects");
+  if (fs.existsSync(projectsDir)) {
+    const projects = fs.readdirSync(projectsDir, { withFileTypes: true }).filter((e) => e.isDirectory());
+    if (projects.length) {
+      lines.push("  项目层:");
+      for (const project of projects) {
+        const zone = path.join(projectsDir, project.name);
+        const stateLines = fs.existsSync(path.join(zone, "STATE.md"))
+          ? fs.readFileSync(path.join(zone, "STATE.md"), "utf-8").split("\n").length : 0;
+        const fill = Math.min(100, Math.round((stateLines / STATE_SOFT_CAP_LINES) * 100));
+        lines.push(`    · ${project.name}（STATE ${fill}%${fill >= 90 ? " ⚠️ 接近上限" : ""}）`);
+      }
+    }
+  }
+  const legacyState = path.join(expertDir, "STATE.md");
+  if (fs.existsSync(legacyState)) lines.push(`  （旧单层布局：根 STATE.md ${fs.readFileSync(legacyState, "utf-8").split("\n").length} 行）`);
   const agentPath = path.join(paths.agentsDir, `${name}.md`);
-  return [
-    `专家 ${name}`,
-    `  目录: ${expertDir}`,
-    `  ${describe("STATE.md")} · ${describe("LOG.md")} · ${describe("DECISIONS.md")}`,
-    `  Agent 定义: ${fs.existsSync(agentPath) ? `已就绪（${agentPath}）` : `缺失（${agentPath}）`}`,
-    `  记忆作用域: 本目录（会话在此目录工作即绑定此域；上层自动继承全局与用户域）`,
-  ].join("\n");
+  lines.push(`  Agent 定义: ${fs.existsSync(agentPath) ? `已就绪（${agentPath}）` : `缺失（${agentPath}）`}`);
+  return lines.join("\n");
 }
 
 export function registerExpertCommand(

@@ -24,21 +24,34 @@ describe("expert scaffolding", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it("scaffolds charter, memory files, and a dispatchable agent definition", () => {
+  it("scaffolds charter, craft layer, project layer root, and agent definition", () => {
     const result = createExpert(paths, "vuln-review", "漏洞审核：对扫描发现做人工级复核与定级");
     assert.equal(result.ok, true);
     const dir = result.expertDir!;
-    for (const file of ["AGENTS.md", "STATE.md", "LOG.md", "DECISIONS.md"]) {
-      assert.ok(fs.existsSync(path.join(dir, file)), `${file} created`);
-    }
-    assert.ok(fs.existsSync(path.join(dir, "refs", ".gitkeep")), "refs/ created");
+    assert.ok(fs.existsSync(path.join(dir, "AGENTS.md")), "charter created");
+    assert.ok(fs.existsSync(path.join(dir, "CRAFT.md")), "cross-project craft file created");
+    assert.ok(fs.existsSync(path.join(dir, "projects", ".gitkeep")), "projects/ root created");
     const charter = fs.readFileSync(path.join(dir, "AGENTS.md"), "utf-8");
-    assert.match(charter, /开工先读 `STATE\.md`/);
+    assert.match(charter, /projects\/<本项目>\/STATE\.md/);
+    assert.match(charter, /CRAFT\.md/);
     assert.match(charter, /漏洞审核/, "charter carries the domain description");
     const agent = fs.readFileSync(result.agentPath!, "utf-8");
     assert.match(agent, /^name: vuln-review$/m);
     assert.match(agent, /^tools: read, grep, find, ls, bash$/m);
-    assert.match(agent, /开工先读 STATE\.md/);
+  });
+
+  it("keeps per-project zones isolated and never mixes them", async () => {
+    const { ensureProjectZone } = await import("../../src/handlers/expert.js");
+    createExpert(paths, "storage", "存储治理");
+    const zoneA = ensureProjectZone(path.join(paths.expertBaseDir, "storage"), "code-audit", "storage");
+    const zoneB = ensureProjectZone(path.join(paths.expertBaseDir, "storage"), "project-b", "storage");
+    assert.notEqual(zoneA, zoneB);
+    fs.appendFileSync(path.join(zoneA, "STATE.md"), "- 项目A的存储状态\n", "utf-8");
+    const stateB = fs.readFileSync(path.join(zoneB, "STATE.md"), "utf-8");
+    assert.ok(!stateB.includes("项目A"), "project B state never inherits project A content");
+    for (const file of ["STATE.md", "LOG.md", "DECISIONS.md"]) {
+      assert.ok(fs.existsSync(path.join(zoneA, file)), `${file} in zone A`);
+    }
   });
 
   it("refuses duplicate experts lookup-first instead of overwriting", () => {
@@ -66,7 +79,8 @@ describe("expert scaffolding", () => {
     const result = createExpert(paths, "half", "补齐");
     assert.equal(result.ok, true);
     assert.equal(fs.readFileSync(path.join(paths.expertBaseDir, "half", "AGENTS.md"), "utf-8"), "手工章程");
-    assert.ok(fs.existsSync(path.join(paths.expertBaseDir, "half", "STATE.md")), "missing files filled in");
+    assert.ok(fs.existsSync(path.join(paths.expertBaseDir, "half", "CRAFT.md")), "missing files filled in");
+    assert.ok(fs.existsSync(path.join(paths.expertBaseDir, "half", "projects")), "projects/ filled in");
     assert.ok(fs.existsSync(path.join(paths.agentsDir, "half.md")), "agent definition added");
   });
 
@@ -76,10 +90,10 @@ describe("expert scaffolding", () => {
     const listing = listExperts(paths);
     assert.match(listing, /alpha/);
     assert.match(listing, /beta/);
-    assert.match(listing, /STATE \d+%/);
+    assert.match(listing, /手艺 \d+ 条/);
     const status = expertStatus(paths, "alpha");
     assert.match(status, /Agent 定义: 已就绪/);
-    assert.match(status, /记忆作用域/);
+    assert.match(status, /手艺（跨项目）: 0 条/);
     assert.match(expertStatus(paths, "missing"), /没有专家/);
   });
 });
