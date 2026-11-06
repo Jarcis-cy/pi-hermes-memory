@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { deriveEventEntities } from "./event-entities.js";
+import { EVENT_ENTITIES_VERSION, deriveEventEntities } from "./event-entities.js";
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import { SCHEMA_SQL } from './schema.js';
@@ -78,6 +78,7 @@ export const SQLITE_WAL_AUTOCHECKPOINT_PAGES = 1000;
 export const FTS5_MIGRATION_MAX_LOCK_ATTEMPTS = 3;
 
 const FTS5_TOKENIZER_VERSION_KEY = 'fts5_tokenizer_version';
+const EVENT_ENTITIES_VERSION_KEY = 'event_entities_version';
 const FTS5_TOKENIZER_VERSION = 'trigram-v1';
 const FTS5_TRIGRAM_TABLES = {
   message: `CREATE VIRTUAL TABLE message_fts USING fts5(
@@ -1208,24 +1209,47 @@ export class DatabaseManager {
     }
     if (!names.has('entities')) {
       db.exec('ALTER TABLE memory_events ADD COLUMN entities TEXT');
-      this.backfillMemoryEventEntities(db);
     }
+    // Unconditional on purpose: the version key decides whether the ledger is
+    // re-derived, so this cannot be gated behind "column was just added".
+    this.backfillMemoryEventEntities(db);
   }
 
   /** One-time facet backfill: rows captured before the entities column existed
    * get their deterministic tags derived here, so the facet filter covers the
    * whole ledger, not just events captured after the upgrade. */
   private backfillMemoryEventEntities(db: DatabaseLike): void {
+    // Re-derive the whole ledger when the derivation itself changed, not just the
+    // rows that have no tags: a bad tag (e.g. "e.g" from a dotted-identifier
+    // regex) is worse than a missing one, and it would otherwise persist forever.
+    const versionRow = db.prepare(
+      "SELECT value FROM extension_metadata WHERE key = ?",
+    ).get(EVENT_ENTITIES_VERSION_KEY) as { value?: string } | undefined;
+    const stale = versionRow?.value !== EVENT_ENTITIES_VERSION;
+    // Cheap probe first when nothing changed: a full-table SELECT on every open
+    // would tax every session start for no benefit.
+    const pending = stale
+      ? db.prepare("SELECT 1 AS present FROM memory_events LIMIT 1").get() as { present?: number } | undefined
+      : db.prepare("SELECT 1 AS present FROM memory_events WHERE entities IS NULL LIMIT 1").get() as { present?: number } | undefined;
+    // Nothing to derive means nothing to version: an empty ledger must not grow a
+    // metadata row just because it was opened.
+    if (!pending) return;
     const rows = db.prepare(
-      "SELECT id, content, evidence_quote FROM memory_events WHERE entities IS NULL",
+      stale
+        ? "SELECT id, content, evidence_quote FROM memory_events"
+        : "SELECT id, content, evidence_quote FROM memory_events WHERE entities IS NULL",
     ).all() as Array<{ id: number | bigint; content: string | null; evidence_quote: string | null }>;
-    if (rows.length === 0) return;
     const update = db.prepare("UPDATE memory_events SET entities = ? WHERE id = ?");
     const write = () => {
       for (const row of rows) {
         const entities = deriveEventEntities(row.content, row.evidence_quote);
-        if (entities.length === 0) continue;
-        update.run(`|${entities.join("|")}|`, row.id as number);
+        update.run(entities.length === 0 ? null : `|${entities.join("|")}|`, row.id as number);
+      }
+      if (stale) {
+        db.prepare(
+          "INSERT INTO extension_metadata (key, value) VALUES (?, ?)"
+          + " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        ).run(EVENT_ENTITIES_VERSION_KEY, EVENT_ENTITIES_VERSION);
       }
     };
     const withTransaction = (db as { transaction?: (fn: () => void) => () => void }).transaction;
