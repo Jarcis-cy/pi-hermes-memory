@@ -157,6 +157,11 @@ export interface MemoryConfig {
 
   /** Inject accepted adaptive principles into every agent run. Default: true */
   principleInjectionEnabled?: boolean;
+
+  /** Inject a small `<task-prefetch>` block of prior events matched against the
+   * current prompt. Default: true. Disable when prompt tokens are scarce or when
+   * a project deliberately wants pull-only recall. */
+  taskPrefetchEnabled?: boolean;
 }
 
 export type MemoryCategory =

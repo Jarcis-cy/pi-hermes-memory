@@ -325,6 +325,9 @@ export default function (pi: ExtensionAPI) {
       lazy ? null : dbManager,
       config.principleInjectionEnabled !== false,
       lazy ? globalDir : null,
+      // The live prompt is what turns principle selection and prefetch from
+      // "important things" into "things relevant to this task".
+      event.prompt,
     );
     if (!promptContext) return;
 

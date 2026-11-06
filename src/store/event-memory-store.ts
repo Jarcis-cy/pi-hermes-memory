@@ -14,6 +14,7 @@ import {
   normalizeFts5Query,
   normalizeNaturalLanguageFts5Query,
 } from "./fts-query.js";
+import { TASK_RELEVANCE_STRONG, extractTaskTerms, scoreTaskRelevance } from "./task-terms.js";
 import { scanContent } from "./content-scanner.js";
 
 export type EventScope = "global" | "user" | "project";
@@ -1635,22 +1636,33 @@ export function buildPrincipleIndex(
  * - **C, contrast**: active principles violated within the last 30 days. A set
  *   that only surfaces what matches becomes an echo chamber; the ignored default
  *   keeps a guaranteed slice.
- * - **B, competition**: everything else, ranked by strength (use, follow,
- *   violation recency) with scope as tiebreaker. Weak principles fall out of the
- *   prompt but stay recallable through memory_search.
+ * - **B, competition**: everything else. Within each scope queue the order is
+ *   task relevance first (`taskText`, when given), then strength (use, follow,
+ *   violation recency). Weak and unrelated principles fall out of the prompt but
+ *   stay recallable through memory_search.
  *
- * Deterministic given the same database state and clock. Nothing is deleted; only
- * the injected selection changes.
+ * The competition registers keep alternating project and shared picks, so
+ * relevance cannot make one scope class starve the other. When `taskText` is
+ * empty or matches nothing, ordering is exactly the pre-relevance one: relevance
+ * is an additive signal, never a filter.
+ *
+ * Deterministic given the same database state, clock and task text. Nothing is
+ * deleted; only the injected selection changes.
  */
 export function renderAdaptivePrinciples(
   dbManager: DatabaseManager,
   project?: string | null,
   includeConflicts = true,
   charLimit: number = DEFAULT_PRINCIPLE_CHAR_LIMIT,
+  taskText = "",
 ): string {
   const principles = getActivePrinciples(dbManager, project);
   const conflicts = includeConflicts ? getRelevantPendingPrincipleConflicts(dbManager, project, 3) : [];
   const blocks: string[] = [];
+  const taskTerms = extractTaskTerms(taskText);
+  const taskRelevance = (principle: AdaptivePrinciple): number => (
+    taskTerms.length === 0 ? 0 : scoreTaskRelevance(principle.content, taskTerms)
+  );
   if (principles.length) {
     const now = new Date();
     const scopeRank = (principle: AdaptivePrinciple) => (principle.scope === "project" ? 0 : principle.scope === "user" ? 1 : 2);
@@ -1665,7 +1677,20 @@ export function renderAdaptivePrinciples(
     const violated = principles
       .filter((principle) => !principle.pinned && recentlyViolated(principle, now))
       .sort((a, b) => (a.lastFeedbackAt === b.lastFeedbackAt ? b.violatedCount - a.violatedCount : (b.lastFeedbackAt ?? "").localeCompare(a.lastFeedbackAt ?? "")));
-    const competing = principles.filter((principle) => !principle.pinned && !violated.includes(principle)).sort(byPreference);
+    // Relevance tiers the competition register without filtering it: a strong
+    // match for this prompt outranks a stronger-sounding unrelated default, and
+    // an unrelated principle keeps exactly its old position behind them.
+    const relevanceTier = (principle: AdaptivePrinciple): number => {
+      const score = taskRelevance(principle);
+      if (score >= TASK_RELEVANCE_STRONG) return 2;
+      return score > 0 ? 1 : 0;
+    };
+    const byCompetition = (a: AdaptivePrinciple, b: AdaptivePrinciple) => {
+      const byRelevance = relevanceTier(b) - relevanceTier(a);
+      if (byRelevance !== 0) return byRelevance;
+      return byPreference(a, b);
+    };
+    const competing = principles.filter((principle) => !principle.pinned && !violated.includes(principle)).sort(byCompetition);
 
     const header = [
       "<adaptive-principles>",
@@ -1795,10 +1820,15 @@ async function writePrinciplesInjectionSnapshot(
 }
 
 /** Render the same adaptive-principles / memory-conflicts prompt blocks as
- * renderAdaptivePrinciples, but from the file snapshot (no SQLite open). */
+ * renderAdaptivePrinciples, but from the file snapshot (no SQLite open).
+ *
+ * The snapshot carries no strength metadata, so ordering here is task relevance
+ * first and stored order otherwise — the same additive signal the SQLite path
+ * uses, with fewer inputs available. */
 export async function renderAdaptivePrinciplesFromSnapshot(
   dir: string,
   project?: string | null,
+  taskText = "",
 ): Promise<string> {
   let payload: { charLimit?: number; principles?: InjectionPrinciple[]; conflicts?: InjectionConflict[] };
   try {
@@ -1811,8 +1841,12 @@ export async function renderAdaptivePrinciplesFromSnapshot(
     || principle.scope === "user"
     || (principle.scope === "project" && project != null && principle.project === project),
   );
+  const snapshotTerms = extractTaskTerms(taskText);
+  const ordered = snapshotTerms.length === 0
+    ? scoped
+    : [...scoped].sort((a, b) => scoreTaskRelevance(b.content, snapshotTerms) - scoreTaskRelevance(a.content, snapshotTerms));
   const blocks: string[] = [];
-  if (scoped.length) {
+  if (ordered.length) {
     const limit = payload.charLimit ?? DEFAULT_PRINCIPLE_CHAR_LIMIT;
     const header = [
       "<adaptive-principles>",
@@ -1822,26 +1856,26 @@ export async function renderAdaptivePrinciplesFromSnapshot(
       "",
     ];
     const footer: string[] = [];
-    const omissionReserve = omissionNote(scoped.length, scoped.length, limit).length;
+    const omissionReserve = omissionNote(ordered.length, ordered.length, limit).length;
     const budget = Math.max(0, limit - header.join("\n").length - "</adaptive-principles>".length - omissionReserve);
     const lines: string[] = [];
     let used = 0;
     let omitted = 0;
-    for (const [index, principle] of scoped.entries()) {
+    for (const [index, principle] of ordered.entries()) {
       const line = `${index + 1}. [P${principle.id}/${principle.scope}] ${principle.content}`;
       if (used + line.length + 1 > budget) {
-        omitted = scoped.length - index;
+        omitted = ordered.length - index;
         break;
       }
       lines.push(line);
       used += line.length + 1;
     }
     if (omitted > 0) {
-      footer.push(omissionNote(omitted, scoped.length, limit));
+      footer.push(omissionNote(omitted, ordered.length, limit));
     }
     blocks.push([...header, ...lines, ...footer, "</adaptive-principles>"].join("\n"));
     const shownIds = new Set(lines.map((line) => Number(line.slice(line.indexOf("[P") + 2, line.indexOf("/")))));
-    const index = buildPrincipleIndex(scoped.filter((principle) => !shownIds.has(principle.id)));
+    const index = buildPrincipleIndex(ordered.filter((principle) => !shownIds.has(principle.id)));
     if (index) blocks.push(index);
   }
   const conflicts = payload.conflicts ?? [];

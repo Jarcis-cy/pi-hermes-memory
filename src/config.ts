@@ -86,6 +86,7 @@ const DEFAULT_CONFIG: MemoryConfig = {
   principleCharLimit: DEFAULT_PRINCIPLE_CHAR_LIMIT,
   principleStoreCharLimit: DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT,
   principleInjectionEnabled: true,
+  taskPrefetchEnabled: true,
   projectsMemoryDir: DEFAULT_PROJECTS_MEMORY_DIR,
   sessionSearch: { variant: "legacy" },
   quickCheckOnOpen: true,
@@ -202,6 +203,7 @@ export function loadConfig(configPath = DEFAULT_CONFIG_PATH): MemoryConfig {
       if (isPositiveInteger(parsed.principleCharLimit)) config.principleCharLimit = parsed.principleCharLimit;
       if (isPositiveInteger(parsed.principleStoreCharLimit)) config.principleStoreCharLimit = parsed.principleStoreCharLimit;
       if (typeof parsed.principleInjectionEnabled === "boolean") config.principleInjectionEnabled = parsed.principleInjectionEnabled;
+      if (typeof parsed.taskPrefetchEnabled === "boolean") config.taskPrefetchEnabled = parsed.taskPrefetchEnabled;
       if (typeof parsed.projectCharLimit === "number") config.projectCharLimit = parsed.projectCharLimit;
       if (typeof parsed.memoryDir === "string") {
         const normalizedMemoryDir = normalizeConfiguredMemoryDir(parsed.memoryDir);
