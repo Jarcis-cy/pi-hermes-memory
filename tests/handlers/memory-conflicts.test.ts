@@ -89,7 +89,13 @@ describe("nearest-principle hints for id-less conflicts", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  const mergeMisuseConflict = (candidateContent: string) => {
+  /**
+   * Park an id-less conflict through a path that still exists: a candidate that
+   * restates an active principle is held for review with a reference to that
+   * principle rather than a supersede target. (Model-mislabelled merges/refines are
+   * repaired into add/refine now, so they no longer reach the queue.)
+   */
+  const restatementConflict = (candidateContent: string, charLimit = 5000) => {
     const capture = captureMemoryEvents(dbManager, [{
       scope: "global",
       kind: "insight",
@@ -98,13 +104,13 @@ describe("nearest-principle hints for id-less conflicts", () => {
     }], { source: "background-review" });
     const events = getMemoryEvents(dbManager, { pendingOnly: true });
     const runId = startConcretionRun(dbManager, "manual", events.length);
-    applyConcretionPlan(dbManager, runId, events, [{
-      action: "merge",
+    return applyConcretionPlan(dbManager, runId, events, [{
+      action: "add",
       scope: "global",
       content: candidateContent,
       sourceEventIds: capture.eventIds,
       existingPrincipleIds: [],
-    }], { charLimit: 5000 });
+    }], { charLimit });
   };
 
   it("shows the lexically nearest active principles when the conflict carries no opposing ids", () => {
@@ -124,9 +130,9 @@ describe("nearest-principle hints for id-less conflicts", () => {
       existingPrincipleIds: [],
     }], { charLimit: 5000 });
 
-    mergeMisuseConflict("Back up data before any bulk write to a datastore table.");
+    restatementConflict("Back up data before a bulk write.");
     const output = formatPrincipleConflicts(dbManager, getPendingPrincipleConflicts(dbManager));
-    assert.match(output, /Merge did not identify at least two active principles/);
+    assert.match(output, /Possible restatement of P1/);
     assert.match(output, /Nearest active principle\(s\):/);
     assert.match(output, /P1 \(0\.\d+\): Back up data before any bulk write to a datastore\./);
   });
@@ -148,8 +154,11 @@ describe("nearest-principle hints for id-less conflicts", () => {
       existingPrincipleIds: [],
     }], { charLimit: 5000 });
 
-    mergeMisuseConflict("Rotate log files nightly to keep disk usage bounded.");
+    // Over capacity is the remaining id-less conflict: nothing opposes the
+    // candidate, the store simply has no room for it.
+    restatementConflict("Rotate log files nightly to keep disk usage bounded.", 80);
     const output = formatPrincipleConflicts(dbManager, getPendingPrincipleConflicts(dbManager));
+    assert.match(output, /character principle budget|Possible restatement/);
     assert.doesNotMatch(output, /Nearest active principle/);
   });
 });

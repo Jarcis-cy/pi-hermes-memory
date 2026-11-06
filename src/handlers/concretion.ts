@@ -109,6 +109,12 @@ export interface ConcretionResult {
   skipped: number;
   /** Batch events left pending because no candidate classified them. */
   unclassified: number;
+  /** Candidates whose claimed action was repaired (downgraded or re-scoped)
+   * instead of parked as a conflict. */
+  repaired?: number;
+  /** Contradictions settled without asking because newer evidence overturned one
+   * unpinned principle. */
+  autoSuperseded?: number;
   error?: string;
 }
 
@@ -409,6 +415,8 @@ export async function runConcretion(
       refined: applied.refined,
       merged: applied.merged,
       conflicts: applied.conflicts,
+      repaired: applied.repaired ?? 0,
+      autoSuperseded: applied.autoSuperseded ?? 0,
       ignored: applied.ignored,
       skipped: applied.skipped,
       unclassified: applied.unclassified,
@@ -448,7 +456,8 @@ export interface ConcretionCatchupResult {
   /** Distillation runs actually executed in this catch-up pass. */
   runs: number;
   /** Totals across executed runs, for a single aggregated notification. */
-  aggregate: Pick<ConcretionResult, "added" | "refined" | "reinforced" | "merged" | "conflicts" | "ignored" | "skipped">;
+  aggregate: Pick<ConcretionResult, "added" | "refined" | "reinforced" | "merged" | "conflicts" | "ignored" | "skipped">
+    & { repaired: number; autoSuperseded: number };
   /** Set when a run failed; a failure stops the pass — the next review
    * retries, so one persistent error never becomes a retry storm. */
   failure?: string;
@@ -481,7 +490,10 @@ export async function drainConcretionQueue(
   deps: ConcretionDeps = {},
 ): Promise<ConcretionCatchupResult> {
   const run = deps.runConcretion ?? runConcretion;
-  const aggregate = { added: 0, refined: 0, reinforced: 0, merged: 0, conflicts: 0, ignored: 0, skipped: 0 };
+  const aggregate = {
+    added: 0, refined: 0, reinforced: 0, merged: 0, conflicts: 0, ignored: 0, skipped: 0,
+    repaired: 0, autoSuperseded: 0,
+  };
   let runs = 0;
   let failure: string | undefined;
   while (runs < CONCRETION_CATCHUP_MAX_RUNS && shouldRunAutomaticConcretion(dbManager, config)) {
@@ -501,6 +513,8 @@ export async function drainConcretionQueue(
     aggregate.conflicts += result.conflicts;
     aggregate.ignored += result.ignored;
     aggregate.skipped += result.skipped;
+    aggregate.repaired += result.repaired ?? 0;
+    aggregate.autoSuperseded += result.autoSuperseded ?? 0;
   }
   return { runs, aggregate, failure, pendingAfter: getPendingConcretionStats(dbManager).events };
 }
@@ -525,7 +539,9 @@ export function registerConcretionCommand(
         return;
       }
       ctx.ui.notify(
-        `Memory concretion reviewed ${result.eventCount} event(s): ${result.added} added, ${result.refined} refined, ${result.reinforced} reinforced, ${result.merged} merged, ${result.conflicts} conflict(s), ${result.ignored} classified as needing no principle, ${result.skipped} skipped, ${result.unclassified} left pending.`,
+        `Memory concretion reviewed ${result.eventCount} event(s): ${result.added} added, ${result.refined} refined, ${result.reinforced} reinforced, ${result.merged} merged, ${result.conflicts} conflict(s), ${result.ignored} classified as needing no principle, ${result.skipped} skipped, ${result.unclassified} left pending`
+        + `${(result.autoSuperseded ?? 0) > 0 ? `, ${result.autoSuperseded} contradiction(s) settled by newer evidence` : ""}`
+        + `${(result.repaired ?? 0) > 0 ? `, ${result.repaired} candidate(s) repaired instead of parked` : ""}.`,
         result.conflicts > 0 ? "warning" : "info",
       );
     },

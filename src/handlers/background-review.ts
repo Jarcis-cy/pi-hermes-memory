@@ -347,7 +347,7 @@ export function setupBackgroundReview(
           const { aggregate } = drained;
           if (aggregate.added > 0 || aggregate.refined > 0 || aggregate.reinforced > 0 || aggregate.conflicts > 0) {
             ctx.ui.notify(
-              `🧠 Memory concretion: ${aggregate.added} added, ${aggregate.refined} refined, ${aggregate.reinforced} reinforced, ${aggregate.merged} merged, ${aggregate.conflicts} conflict${aggregate.conflicts === 1 ? "" : "s"}, ${aggregate.ignored} no-action, ${aggregate.skipped} skipped`,
+              `🧠 Memory concretion: ${aggregate.added} added, ${aggregate.refined} refined, ${aggregate.reinforced} reinforced, ${aggregate.merged} merged, ${aggregate.conflicts} conflict${aggregate.conflicts === 1 ? "" : "s"}, ${aggregate.autoSuperseded} auto-settled, ${aggregate.repaired} repaired, ${aggregate.ignored} no-action, ${aggregate.skipped} skipped`,
               aggregate.conflicts > 0 ? "warning" : "info",
             );
           }

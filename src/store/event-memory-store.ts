@@ -156,6 +156,12 @@ export interface ApplyConcretionResult {
   /** Batch events no candidate classified; they stay pending for the next run. */
   unclassified: number;
   concretedEvents: number;
+  /** Candidates whose claimed action the cited principles could not support and
+   * which were downgraded (merge→refine→add) or re-scoped instead of parked. */
+  repaired?: number;
+  /** Contradictions resolved without asking: newer, multiply-evidenced candidate
+   * against one unpinned principle. The old row stays searchable as superseded. */
+  autoSuperseded?: number;
 }
 
 function nowIso(): string {
@@ -683,6 +689,77 @@ function activePrinciplePayloadChars(db: ReturnType<DatabaseManager["getDb"]>, c
 function linkPrincipleSources(db: ReturnType<DatabaseManager["getDb"]>, principleId: number, eventIds: number[]): void {
   const insert = db.prepare("INSERT OR IGNORE INTO principle_sources (principle_id, event_id) VALUES (?, ?)");
   for (const eventId of [...new Set(eventIds)]) insert.run(principleId, eventId);
+}
+
+/** How many newer source events a candidate needs before it may retire an
+ * existing principle without asking the user. One remark is not a reversal. */
+const AUTO_SUPERSEDE_MIN_EVIDENCE = 2;
+
+/**
+ * Repair a claimed action against the principles that actually exist.
+ *
+ * Model output mislabels its own action routinely: `merge` citing one principle,
+ * `refine` citing none, `conflict` citing nothing to contradict. Parking those as
+ * conflicts makes the queue unreadable and the user the error handler. Downgrade
+ * instead — a merge of one is a refinement, a refinement of none is an addition —
+ * and let the add path's own duplicate/restatement/budget gates decide.
+ *
+ * `merge` with two or more valid citations stays a merge only because the caller
+ * passes the validated id list, never the raw one.
+ */
+function repairCandidateAction(action: ConcretionCandidate["action"], validCitations: number): ConcretionCandidate["action"] {
+  if (action === "merge") return validCitations >= 2 ? "merge" : validCitations === 1 ? "refine" : "add";
+  if (action === "refine") return validCitations === 1 ? "refine" : validCitations >= 2 ? "merge" : "add";
+  if (action === "conflict") return validCitations >= 1 ? "conflict" : "add";
+  return action;
+}
+
+function latestOccurredAt(events: Array<MemoryEvent | undefined>): string | null {
+  let latest: string | null = null;
+  for (const event of events) {
+    const value = event?.occurredAt ?? null;
+    if (value && (latest === null || value > latest)) latest = value;
+  }
+  return latest;
+}
+
+/**
+ * Decide whether a contradiction can be settled without the user.
+ *
+ * Conditions, all required:
+ * - exactly one active principle is contradicted (two-way ambiguity stays human);
+ * - the candidate carries at least two source events (a single remark is not a
+ *   reversal, and a reversal is the one thing that must not happen by accident);
+ * - the candidate's newest evidence is strictly newer than everything the
+ *   conflicting principle cites (no new evidence means no reason to overturn);
+ * - the conflicting principle is not pinned (pinned rules are the safety register).
+ *
+ * Returns the principle id to supersede, or null to park the conflict.
+ */
+function pickAutoSupersedeTarget(
+  db: ReturnType<DatabaseManager["getDb"]>,
+  conflictingIds: number[],
+  sourceEventIds: number[],
+  eventsById: Map<number, MemoryEvent>,
+): number | null {
+  if (conflictingIds.length !== 1) return null;
+  if (sourceEventIds.length < AUTO_SUPERSEDE_MIN_EVIDENCE) return null;
+  const principleId = conflictingIds[0]!;
+  const target = db.prepare("SELECT pinned FROM principles WHERE id = ? AND status = 'active'").get(principleId) as
+    | { pinned: number }
+    | undefined;
+  if (!target || Number(target.pinned) === 1) return null;
+  const candidateLatest = latestOccurredAt(sourceEventIds.map((id) => eventsById.get(id)));
+  if (!candidateLatest) return null;
+  const cited = db.prepare(`
+    SELECT MAX(e.occurred_at) AS latest
+    FROM principle_sources ps
+    JOIN memory_events e ON e.id = ps.event_id
+    WHERE ps.principle_id = ?
+  `).get(principleId) as { latest: string | null } | undefined;
+  const principleLatest = cited?.latest ?? null;
+  if (principleLatest && candidateLatest <= principleLatest) return null;
+  return principleId;
 }
 
 function relevantPrincipleIdsForCandidate(
@@ -1250,7 +1327,7 @@ export function applyConcretionPlan(
         continue;
       }
 
-      const scope = candidate.scope;
+      let scope = candidate.scope;
       const content = candidate.content?.trim();
       if (!scope || !content || !EVENT_SCOPES.has(scope)) {
         result.skipped++;
@@ -1259,7 +1336,7 @@ export function applyConcretionPlan(
       const sourceProjects = [...new Set(sourceEventIds
         .map((id) => eventsById.get(id)?.project ?? null)
         .filter((project): project is string => Boolean(project)))];
-      const project = scope === "project"
+      let project = scope === "project"
         ? (sourceProjects.length === 1 ? sourceProjects[0] : cleanNullable(options.project))
         : null;
       const rationale = cleanNullable(candidate.rationale);
@@ -1271,44 +1348,26 @@ export function applyConcretionPlan(
       const safeConflictReason = rawConflictReason && !scanContent(rawConflictReason)
         ? rawConflictReason
         : undefined;
-      const relevantExistingIds = relevantPrincipleIdsForCandidate(db, existingIds, scope, project);
+      // A project-scoped candidate whose evidence cannot name one project is not a
+      // user decision: the rule simply is not project-scoped. Promote it to global
+      // instead of parking a conflict nobody can act on (the parking reason used to
+      // be unactionable — the user had no way to supply the missing scoping).
       if (scope === "project" && (!project || sourceProjects.length > 1)) {
-        recordConflictInTransaction(db, {
-          scope,
-          project: project ?? null,
-          content,
-          rationale,
-          conflictingPrincipleIds: relevantExistingIds,
-          sourceEventIds,
-          reason: sourceProjects.length > 1
-            ? "Candidate combines events from multiple projects and requires user scoping."
-            : "Project-scoped candidate has no authoritative project source.",
-        });
-        result.conflicts++;
-        for (const eventId of sourceEventIds) consumedEventIds.add(eventId);
-        continue;
+        scope = "global";
+        project = null;
+        result.repaired = (result.repaired ?? 0) + 1;
       }
-      if (candidate.action === "conflict") {
-        recordConflictInTransaction(db, {
-          scope,
-          project,
-          content,
-          rationale,
-          conflictingPrincipleIds: relevantExistingIds,
-          sourceEventIds,
-          reason: safeConflictReason || "Candidate conflicts with an active principle.",
-        });
-        result.conflicts++;
-        for (const eventId of sourceEventIds) consumedEventIds.add(eventId);
-        continue;
-      }
+      const relevantExistingIds = relevantPrincipleIdsForCandidate(db, existingIds, scope, project);
+      const action = repairCandidateAction(candidate.action, relevantExistingIds.length);
+      if (action !== candidate.action) result.repaired = (result.repaired ?? 0) + 1;
 
-      if (candidate.action === "merge") {
-        // A merge must shrink the store: require at least two active principles
-        // in this scope and reject silently-dropped ids (a partial merge would
-        // supersede principles the model never saw).
-        const cited = [...new Set(candidate.existingPrincipleIds ?? [])];
-        if (cited.length < 2 || relevantExistingIds.length !== cited.length) {
+      // A genuine contradiction is settled without asking only when the newer
+      // candidate is multiply evidenced and the existing rule is not pinned;
+      // otherwise it stays a user decision.
+      let autoSupersedeId: number | null = null;
+      if (action === "conflict") {
+        autoSupersedeId = pickAutoSupersedeTarget(db, relevantExistingIds, sourceEventIds, eventsById);
+        if (autoSupersedeId === null) {
           recordConflictInTransaction(db, {
             scope,
             project,
@@ -1316,20 +1375,25 @@ export function applyConcretionPlan(
             rationale,
             conflictingPrincipleIds: relevantExistingIds,
             sourceEventIds,
-            reason: "Merge did not identify at least two active principles in the same scope.",
+            reason: safeConflictReason || "Candidate conflicts with an active principle.",
           });
           result.conflicts++;
           for (const eventId of sourceEventIds) consumedEventIds.add(eventId);
           continue;
         }
+        result.autoSuperseded = (result.autoSuperseded ?? 0) + 1;
       }
+      const effectiveAction = autoSupersedeId !== null ? "refine" : action;
 
-      const supersedesIds = candidate.action === "refine"
-        ? relevantExistingIds.slice(0, 1)
-        : candidate.action === "merge"
+      // A merge must shrink the store, and only the citations that survived
+      // validation may be superseded — a partial merge would retire principles the
+      // model never saw, so repair has already turned those into refine/add above.
+      const supersedesIds = effectiveAction === "refine"
+        ? (autoSupersedeId !== null ? [autoSupersedeId] : relevantExistingIds.slice(0, 1))
+        : effectiveAction === "merge"
           ? relevantExistingIds
           : [];
-      if (candidate.action === "refine") {
+      if (effectiveAction === "refine") {
         const existing = supersedesIds.length === 1
           ? db.prepare(`
             SELECT id FROM principles
@@ -1337,17 +1401,10 @@ export function applyConcretionPlan(
           `).get(supersedesIds[0], scope, project)
           : null;
         if (!existing) {
-          recordConflictInTransaction(db, {
-            scope,
-            project,
-            content,
-            rationale,
-            conflictingPrincipleIds: relevantExistingIds,
-            sourceEventIds,
-            reason: "Refinement did not identify exactly one active principle in the same scope.",
-          });
-          result.conflicts++;
-          for (const eventId of sourceEventIds) consumedEventIds.add(eventId);
+          // Unreachable by construction (the ids were validated above); a candidate
+          // that gets here is added rather than parked, because the user cannot act
+          // on a scoping mismatch the model invented.
+          result.skipped++;
           continue;
         }
       }
@@ -1400,9 +1457,9 @@ export function applyConcretionPlan(
         result.conflicts++;
       } else if (added.duplicateId) {
         result.reinforced++;
-      } else if (candidate.action === "merge") {
+      } else if (effectiveAction === "merge") {
         result.merged = (result.merged ?? 0) + 1;
-      } else if (candidate.action === "refine") {
+      } else if (effectiveAction === "refine") {
         result.refined++;
       } else {
         result.added++;

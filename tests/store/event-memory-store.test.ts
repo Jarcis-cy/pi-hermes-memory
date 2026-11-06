@@ -371,15 +371,19 @@ describe("event-memory-store", () => {
       existingPrincipleIds: [original.id],
     }], { charLimit: 5000 });
 
-    assert.equal(applied.skipped + applied.conflicts, 2, "both candidates degrade instead of throwing");
+    // 跨项目 reinforce 直接跳过；跨项目 refine 没有可替换的同域原则，修复为一条
+    // 独立的 project-b 记录（而不是改写 project-a，也不再停进冲突队列）。
+    assert.equal(applied.skipped, 1, "the cross-project reinforcement is skipped");
+    assert.equal(applied.conflicts, 0, "a cross-project refinement is not a user decision");
+    assert.equal(applied.repaired, 1);
     assert.equal(applied.reinforced, 0);
     const projectA = getActivePrinciples(dbManager, "project-a");
     assert.equal(projectA.length, 1);
     assert.equal(projectA[0].id, original.id);
     assert.deepEqual(projectA[0].sourceEventIds, a.eventIds);
-    // 该 refine 没有可替换的同域原则 → 记为冲突（冲突会消费它的事件，避免无限重试）；
-    // 跨项目的 reinforce 直接跳过，其事件保持 pending 供下一轮。
-    assert.equal(getActivePrinciples(dbManager, "project-b").length, 0, "no project-b principle was created");
+    const projectB = getActivePrinciples(dbManager, "project-b");
+    assert.equal(projectB.length, 1, "the candidate becomes a project-b rule of its own");
+    assert.equal(projectB[0].content, "Use npm in Project B.");
     assert.deepEqual(getMemoryEvents(dbManager, { pendingOnly: true }).map((event) => event.id), []);
   });
 
@@ -776,8 +780,12 @@ describe("event-memory-store", () => {
       existingPrincipleIds: [only!.id],
     }], { charLimit: 20000 });
 
+    // One cited principle cannot be "merged"; it is refined, which keeps the store
+    // size stable and needs no user decision.
     assert.equal(applied.merged, 0);
-    assert.equal(applied.conflicts, 1);
+    assert.equal(applied.conflicts, 0);
+    assert.equal(applied.repaired, 1);
+    assert.equal(applied.refined, 1);
     assert.equal(getActivePrinciples(dbManager).length, 1);
   });
   it("recalls active principles cold, scoped to the view", () => {
@@ -1029,7 +1037,7 @@ describe("event-memory-store", () => {
     assert.match(conflict.reason, /Possible restatement of P\d+ \(similarity 0\.\d\d\)/);
   });
 
-  it("normalizes a project-scoped conflict that has no project, so accepting it can work", () => {
+  it("adds a project-scoped candidate whose evidence names one project instead of parking it", () => {
     const capture = captureMemoryEvents(dbManager, [{
       scope: "project",
       kind: "convention",
@@ -1046,14 +1054,16 @@ describe("event-memory-store", () => {
       conflictReason: "needs a decision",
     }], { charLimit: 20000 });
 
-    const row = dbManager.getDb().prepare(
-      "SELECT id, candidate_scope, candidate_project FROM principle_conflicts WHERE status='pending'",
-    ).get() as { id: number; candidate_scope: string; candidate_project: string | null };
-    assert.equal(row.candidate_scope, "project");
-    assert.equal(row.candidate_project, "alpha", "the single source project is adopted instead of NULL");
-
-    const resolved = resolvePrincipleConflict(dbManager, row.id, "accept_candidate", 20000);
-    assert.equal(resolved.success, true, "the parked candidate is now actionable");
+    // The evidence names exactly one project, so the candidate is actionable as-is:
+    // it is added under that project instead of being parked for a scoping decision
+    // the user could not make from the queue.
+    const parked = dbManager.getDb().prepare(
+      "SELECT COUNT(*) AS count FROM principle_conflicts WHERE status='pending'",
+    ).get() as { count: number };
+    assert.equal(parked.count, 0, "nothing is parked");
+    const [added] = getActivePrinciples(dbManager, "alpha");
+    assert.equal(added?.content, "Project alpha should use pnpm everywhere.");
+    assert.equal(added?.scope, "project");
   });
   it("lets the user keep a possible restatement separate instead of a dead end", () => {
     const first = captureMemoryEvents(dbManager, [{ scope: "global", kind: "failure", content: "Adapter wiring failed." }], {
