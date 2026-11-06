@@ -56,9 +56,14 @@ function charter(name: string, description: string): string {
     "1. 开工先读本项目 STATE.md（当前状态，一页）。",
     "2. 收工更新本项目 `STATE.md`，往本项目 `LOG.md` 追加一行（日期 + 做了什么 + 结论）；",
     "   其中可跨项目复用的经验，另起一行记入 `CRAFT.md`（标注来源项目）。",
-    `3. 本项目 \`STATE.md\` 接近 ${STATE_SOFT_CAP_LINES} 行时自行蒸馏收页，不问用户：决策结论入 \`DECISIONS.md\`、细节依据入 \`refs/\`、`,
-    `   跨项目经验入 \`CRAFT.md\`、仍有效的旧现状并入「当前基线」，拿不准去留的压成一行进「指针区」——`,
-    "   一律不无痕删除，蒸馏后往 `LOG.md` 记一行去向。",
+    // Curation is append-delta, never a full rewrite: rewriting a page every time it
+    // fills silently drops boundary conditions, which is how the same pit gets
+    // stepped in twice. Moving an entry out means demoting it to a pointer line.
+    `3. 本项目 \`STATE.md\` 接近 ${STATE_SOFT_CAP_LINES} 行时自行收页，不问用户，但**只许增量改，禁整页重写**（重写会逐轮腐蚀边界条件）：`,
+    "   移出＝在原处降级成一行指针，绝不无痕删除：决策结论入 `DECISIONS.md`（一段一条，带日期与来源）、",
+    "   细节依据入 `refs/`、跨项目经验入 `CRAFT.md`、仍有效的旧现状并入「当前基线」、拿不准去留的压成一行进「指针区」；",
+    "   留在 `STATE.md` 的每条结论都要带证据指针（`refs/<文件>` / `E<事件号>` / commit sha / 工单号），缺指针的先补再压；",
+    "   本次移出了什么、去了哪里，往 `LOG.md` 记一行。",
     "",
     "## 工作方式",
     "- 汇报：大白话中文，先结论；用户追问再展开细节。",
