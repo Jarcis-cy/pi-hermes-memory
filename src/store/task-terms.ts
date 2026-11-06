@@ -201,7 +201,8 @@ export function isIdentifierTerm(term: string): boolean {
  * Keeping the first prompt as the anchor would go stale when a session moves on
  * to a new task, so the anchor moves when the prompt introduces a machine
  * identifier the anchor does not already contain (a new ticket, repo, port or
- * service). Ordinary follow-ups ("那 IAR-2000 的 7 是怎么算的？") keep the anchor.
+ * service) *and* shares no identifier with the anchor. Ordinary follow-ups
+ * ("那 IAR-2000 的 7 是怎么算的？", "runtime_pool.go 那段在哪") keep the anchor.
  *
  * Contract: one instance per session, `reset()` on session start/shutdown.
  * Deterministic and free of I/O; safe to call for every prompt.
@@ -221,8 +222,11 @@ export class TaskAnchor {
     const trimmed = (prompt ?? "").trim();
     if (trimmed.length === 0) return this.text;
     const promptIdentifiers = extractTaskTerms(trimmed).filter(isIdentifierTerm);
+    // A follow-up that still mentions the anchored ticket/repo/port stays in the
+    // same task even when it names a new file; only a prompt whose identifiers are
+    // entirely disjoint from the anchor counts as a task switch.
     const isNewTask = this.text.length === 0
-      || promptIdentifiers.some((term) => !this.identifiers.has(term));
+      || (promptIdentifiers.length > 0 && promptIdentifiers.every((term) => !this.identifiers.has(term)));
     if (isNewTask) {
       this.text = trimmed;
       this.identifiers = new Set(promptIdentifiers);

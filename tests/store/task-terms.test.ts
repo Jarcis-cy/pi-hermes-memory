@@ -114,6 +114,12 @@ describe("TaskAnchor", () => {
     assert.equal(seen.size, 1, "all follow-ups must resolve to the same task text");
   });
 
+  it("keeps the anchor when a follow-up names a new file but keeps the same ticket", () => {
+    const anchor = new TaskAnchor();
+    const first = anchor.resolve("IAR-2000 的 instance cap 怎么分层");
+    assert.equal(anchor.resolve("IAR-2000 里 runtime_pool.go 那段在哪"), first);
+  });
+
   it("treats a prompt carrying only brand-new identifiers as a new task", () => {
     const anchor = new TaskAnchor();
     anchor.resolve("IAR-2000 的 ent schema 迁移顺序是什么");
