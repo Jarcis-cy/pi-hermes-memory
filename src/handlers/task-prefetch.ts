@@ -18,7 +18,7 @@
  */
 import type { DatabaseManager } from "../store/db.js";
 import { searchMemoryEvents } from "../store/event-memory-store.js";
-import { TASK_RELEVANCE_STRONG, buildTaskSearchQuery, extractTaskTerms, scoreTaskRelevance } from "../store/task-terms.js";
+import { TASK_RELEVANCE_STRONG, buildTaskSearchQuery, extractTaskTerms, isIdentifierTerm, scoreTaskRelevance } from "../store/task-terms.js";
 
 /** Maximum leads injected per run. Small on purpose: each line competes for the
  * same attention the principles already use. */
@@ -34,19 +34,6 @@ const TASK_PREFETCH_ENTRY_CHARS = 240;
 
 /** Candidates pulled from FTS before relevance ranking. */
 const TASK_PREFETCH_CANDIDATES = 24;
-
-/** A term is identifier-like when it looks machine-generated: a digit, a path or
- * dot separator, or a long single word. Prose ("web", "dev") is not one.
- *
- * This gate exists because the ledger is mostly English while prompts are mostly
- * Chinese: a Chinese-only prompt can only reach the ledger through borrowed
- * English words, and that bridge reliably produces confident noise instead of
- * recall. Staying silent is the better failure — and the identifier is present in
- * nearly every real work prompt (repo, port, service, ticket id). */
-function isIdentifierLike(term: string): boolean {
-  if (!/[a-z0-9]/.test(term)) return false;
-  return /[0-9._\-/]/.test(term) || term.length >= 6;
-}
 
 function sanitize(text: string): string {
   return text.replace(/<\/?task-prefetch[^>]*>/gi, " ").replace(/\s+/g, " ").trim();
@@ -86,8 +73,8 @@ export function buildTaskPrefetchBlock(
   const terms = extractTaskTerms(text);
   if (terms.length === 0) return "";
   // No machine identifier in the prompt means no reliable bridge into the
-  // ledger; see isIdentifierLike.
-  const identifierTerms = terms.filter(isIdentifierLike);
+  // ledger; see isIdentifierTerm.
+  const identifierTerms = terms.filter(isIdentifierTerm);
   if (identifierTerms.length === 0) return "";
 
   let candidates;

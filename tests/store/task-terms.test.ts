@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   MAX_TASK_TERMS,
   TASK_RELEVANCE_STRONG,
+  TaskAnchor,
   buildTaskSearchQuery,
   extractTaskTerms,
   scoreTaskRelevance,
@@ -85,5 +86,44 @@ describe("buildTaskSearchQuery", () => {
   it("returns an empty string when nothing is usable", () => {
     assert.equal(buildTaskSearchQuery("   "), "");
     assert.equal(buildTaskSearchQuery("the and for"), "");
+  });
+});
+
+describe("TaskAnchor", () => {
+  it("keeps the first task for ordinary follow-ups", () => {
+    const anchor = new TaskAnchor();
+    const first = anchor.resolve("IAR-2000 sidecar pool 的 instance cap 是怎么分层的？");
+    assert.equal(anchor.resolve("那 7 是怎么算出来的"), first, "a follow-up must not re-anchor");
+    assert.equal(anchor.resolve("继续"), first);
+  });
+
+  it("re-anchors when the prompt introduces a new machine identifier", () => {
+    const anchor = new TaskAnchor();
+    anchor.resolve("IAR-2000 sidecar pool 的 instance cap 是怎么分层的？");
+    const next = anchor.resolve("换个问题：vite 25173 端口代理到哪了");
+    assert.match(next, /vite 25173/);
+  });
+
+  it("keeps the anchor stable across turns, so the injected block is cacheable", () => {
+    const anchor = new TaskAnchor();
+    const seen = new Set<string>();
+    anchor.resolve("IAR-2000 的 ent schema 迁移顺序是什么");
+    for (const followUp of ["继续说", "那 IAR-2000 的迁移呢", "好", "还有别的坑吗"]) {
+      seen.add(anchor.resolve(followUp));
+    }
+    assert.equal(seen.size, 1, "all follow-ups must resolve to the same task text");
+  });
+
+  it("treats a prompt carrying only brand-new identifiers as a new task", () => {
+    const anchor = new TaskAnchor();
+    anchor.resolve("IAR-2000 的 ent schema 迁移顺序是什么");
+    assert.match(anchor.resolve("顺手看下 deploy/gs-dev/vite.config.ts 的代理"), /vite\.config\.ts/);
+  });
+
+  it("reset() drops the task so the next session starts clean", () => {
+    const anchor = new TaskAnchor();
+    anchor.resolve("IAR-2000 sidecar pool cap");
+    anchor.reset();
+    assert.equal(anchor.resolve("完全不同的新任务 hello world"), "完全不同的新任务 hello world");
   });
 });

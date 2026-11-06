@@ -177,3 +177,56 @@ export function buildTaskSearchQuery(text: string, maxTerms = 8): string {
   if (unique.length === 0) return "";
   return unique.map((term) => `"${term.replace(/"/g, '""')}"`).join(" OR ");
 }
+
+/** Whether a term looks machine-generated: a digit, a path or dot separator, or a
+ * long single word. Prose ("web", "dev") is not one.
+ *
+ * The ledger is mostly English while prompts are mixed, so a Chinese-only prompt
+ * can reach the ledger only through borrowed English words — a bridge that
+ * reliably produces confident noise instead of recall. Identifier terms are the
+ * dependable part of the prompt, and nearly every work prompt has one (repo,
+ * port, service, ticket id). */
+export function isIdentifierTerm(term: string): boolean {
+  if (!/[a-z0-9]/.test(term)) return false;
+  return /[0-9._\-/]/.test(term) || term.length >= 6;
+}
+
+/**
+ * Session-scoped task anchor.
+ *
+ * Relevance is decided once per task, not once per message: the injected blocks
+ * are part of the system prompt, so re-deciding them on every turn changes the
+ * prompt prefix and defeats provider prompt caching for the rest of the session.
+ *
+ * Keeping the first prompt as the anchor would go stale when a session moves on
+ * to a new task, so the anchor moves when the prompt introduces a machine
+ * identifier the anchor does not already contain (a new ticket, repo, port or
+ * service). Ordinary follow-ups ("那 IAR-2000 的 7 是怎么算的？") keep the anchor.
+ *
+ * Contract: one instance per session, `reset()` on session start/shutdown.
+ * Deterministic and free of I/O; safe to call for every prompt.
+ */
+export class TaskAnchor {
+  private text = "";
+  private identifiers = new Set<string>();
+
+  /** Forget the current task, e.g. when a session starts or ends. */
+  reset(): void {
+    this.text = "";
+    this.identifiers.clear();
+  }
+
+  /** The task text to score against for this prompt. */
+  resolve(prompt: string): string {
+    const trimmed = (prompt ?? "").trim();
+    if (trimmed.length === 0) return this.text;
+    const promptIdentifiers = extractTaskTerms(trimmed).filter(isIdentifierTerm);
+    const isNewTask = this.text.length === 0
+      || promptIdentifiers.some((term) => !this.identifiers.has(term));
+    if (isNewTask) {
+      this.text = trimmed;
+      this.identifiers = new Set(promptIdentifiers);
+    }
+    return this.text;
+  }
+}

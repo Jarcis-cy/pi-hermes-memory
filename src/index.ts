@@ -63,6 +63,7 @@ import { loadConfig } from "./config.js";
 import { shouldWarnAutoConsolidationFailure } from "./auto-consolidation-warning.js";
 import { detectProject, detectProjectSkills } from "./project.js";
 import { buildPromptContext } from "./prompt-context.js";
+import { TaskAnchor } from "./store/task-terms.js";
 import { migrateLegacyProjectMemoryDirs } from "./project-memory-migration.js";
 import { AGENT_ROOT } from "./paths.js";
 import { isDatabaseMigrationPending } from "./extension-root-migration.js";
@@ -100,6 +101,9 @@ export default function (pi: ExtensionAPI) {
   const config = loadConfig();
   const lazy = config.lazyInitialization === true && config.memoryMode === "policy-only";
   let sessionContext: ExtensionContext | undefined;
+  // Relevance is decided once per task so the injected blocks stay byte-stable
+  // across turns and provider prompt caching keeps working. See TaskAnchor.
+  const taskAnchor = new TaskAnchor();
 
   const agentRoot = AGENT_ROOT;
   const legacyGlobalDir = path.join(agentRoot, "memory");
@@ -301,6 +305,7 @@ export default function (pi: ExtensionAPI) {
   // Skills and pinned instructions must be available even without a lookup.
   pi.on("session_start", async (_event, ctx) => {
     sessionContext = ctx;
+    taskAnchor.reset();
     // Pinned directives must not depend on migration/SQLite being healthy.
     if (standingStore) await standingStore.load();
     if (!lazy) await ensureMemoryReady(ctx);
@@ -326,8 +331,9 @@ export default function (pi: ExtensionAPI) {
       config.principleInjectionEnabled !== false,
       lazy ? globalDir : null,
       // The live prompt is what turns principle selection and prefetch from
-      // "important things" into "things relevant to this task".
-      event.prompt,
+      // "important things" into "things relevant to this task". The anchor keeps
+      // that decision stable for the rest of the task.
+      taskAnchor.resolve(event.prompt ?? ""),
     );
     if (!promptContext) return;
 
