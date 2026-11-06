@@ -21,8 +21,10 @@ import { captureMemoryEvents } from "../store/event-memory-store.js";
 /** Expert names double as directory names and Matrix @-handles: keep them
  * flat, lowercase, and free of path syntax so no scaffold can escape base. */
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
-/** STATE.md soft cap in lines; the charter tells the expert to surface to the
- * user when approaching it instead of silently dropping content. */
+/** STATE.md soft cap in lines; the charter tells the expert to self-distill
+ * when approaching it (decisions→DECISIONS.md, evidence→refs/, cross-project
+ * lessons→CRAFT.md, maybes→one pointer line) — nothing is dropped without a
+ * trace, so no user decision is required. */
 export const STATE_SOFT_CAP_LINES = 80;
 
 export interface ExpertPaths {
@@ -54,7 +56,9 @@ function charter(name: string, description: string): string {
     "1. 开工先读本项目 STATE.md（当前状态，一页）。",
     "2. 收工更新本项目 `STATE.md`，往本项目 `LOG.md` 追加一行（日期 + 做了什么 + 结论）；",
     "   其中可跨项目复用的经验，另起一行记入 `CRAFT.md`（标注来源项目）。",
-    `3. 本项目 \`STATE.md\` 接近 ${STATE_SOFT_CAP_LINES} 行时，提醒用户决策合并或淘汰——不自行丢弃。`,
+    `3. 本项目 \`STATE.md\` 接近 ${STATE_SOFT_CAP_LINES} 行时自行蒸馏收页，不问用户：决策结论入 \`DECISIONS.md\`、细节依据入 \`refs/\`、`,
+    `   跨项目经验入 \`CRAFT.md\`、仍有效的旧现状并入「当前基线」，拿不准去留的压成一行进「指针区」——`,
+    "   一律不无痕删除，蒸馏后往 `LOG.md` 记一行去向。",
     "",
     "## 工作方式",
     "- 汇报：大白话中文，先结论；用户追问再展开细节。",
@@ -68,12 +72,15 @@ function projectStateTemplate(name: string): string {
   return [
     `# ${name} 当前状态`,
     "",
-    "（首次收工时更新；保持一页以内）",
+    `（首次收工时更新；保持一页以内——接近 ${STATE_SOFT_CAP_LINES} 行按铁律 3 自行蒸馏收页）`,
     "",
     "## 现状",
     "- 尚无记录",
     "",
     "## 指针区（被挤出的内容在这里留一行去向）",
+    "- （空）",
+    "",
+    "## 当前基线（长期事实与待办候选；蒸馏后仍有效的旧现状并入这里）",
     "- （空）",
     "",
   ].join("\n");
