@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Task-conditional injection** (`taskPrefetchEnabled`, default `true`): the prompt Pi is about to answer now decides what memory reaches it. Adaptive principles keep their three registers — pinned, recently-violated, and the competition queue — but the competition queue is tiered by task relevance (ASCII identifiers weigh 2, CJK bigrams and generic dev words weigh 1; `>= 4` is a strong match) instead of by strength alone, so a rule that matters for this task outranks a stronger-sounding unrelated default. A prompt that matches nothing reproduces the previous selection byte for byte. `task-terms.ts` holds the shared extraction so the principle selector and the prefetch cannot drift into two private notions of "relevant".
+
+- **Start-of-run event prefetch**: `<task-prefetch>` now carries up to five dated, event-id-tagged leads recalled from the episodic ledger by one FTS query, ending with a line that points at `memory_search`/`session_search`. The block says plainly that the lines are leads, not current truth. It stays silent when the prompt carries no machine identifier (a digit, a path separator, or a six-character word): a Chinese-only prompt crossing into an English ledger produces confident noise, not recall, and silence is the better failure.
+
+- **`FACT-<id>` project facts**: the expert charter now sends cross-expert environment facts to `_shared/projects/<project>/FACTS.md` and keeps `STATE.md` to id references. The prefix is `FACT-` rather than `F` because `F5` is already an everyday vendor abbreviation in this corpus and `IAR-1950/F2` is an existing migration-line name.
+
+- **Completion-language evidence gate**: the charter pairs every conclusion word (`fixed`, `committed`, `pushed`, `deployed`, `resolved`) with the artefact that proves it — a failing-then-passing test name, a sha with a clean status, a status line that agrees with the remote, a runtime probe — and bans three phrasings that have historically hidden real defects: "pending commit/push", "should be fine", and "verified" with no output. "Landed but unverified" is kept as a legitimate, nameable status.
+
+### Changed
+
+- **STATE.md curation is append-delta, never a page rewrite**: rewriting a page every time it fills silently drops boundary conditions — how the same pit gets stepped in twice. Entries move out by being demoted to a single pointer line, every retained conclusion must carry an evidence pointer (`refs/<file>`, `E<event id>`, commit sha, ticket), and the move is logged.
+
+- **Concretion conflicts are triaged instead of queued**: of 18 pending rows on the live ledger, 14 were the model mislabelling its own action — a `merge` citing one principle, a `refine` citing none, a `conflict` with nothing to contradict. Those are repaired now (`merge` -> `refine` -> `add`, validated against the principles that actually exist), and a project-scoped candidate whose evidence cannot name one project is promoted to `global` rather than parked for a scoping decision the queue never let the user make. A genuine reversal is settled without asking only when exactly one principle is contradicted, the candidate carries at least two source events, its newest evidence is strictly newer than everything the target cites, and the target is unpinned. Repairs and auto-settlements are reported in the concretion summary.
+
+### Fixed
+
+- **The task anchor survives follow-ups**: re-deciding relevance on every turn rewrites the injected blocks, and those blocks are part of the system prompt — the prefix would change on each message and defeat provider prompt caching for the rest of the session. `TaskAnchor` keeps the first task and moves only when a prompt's identifiers are disjoint from the anchor, so a follow-up that names a new file but keeps the same ticket stays in the same task. Events without a `prompt` field (several test harnesses emit them) no longer crash the hook.
+
+- **Event facet tags carry ports and drop false positives**: `e.g` was the most common tag in a 30k-event ledger (201 events) because it looks like a dotted identifier, and `0.00s` rode the same regex; ports — how people actually name an environment — were missing entirely, and multi-segment container names never matched. The derivation now emits `port-<n>` and three-or-more-segment container/unit shapes, skips abbreviations and measurements, and carries a version key so an existing ledger is re-derived once (2.5s for 30k rows) instead of keeping its false positives forever. The backfill also no longer hides behind "the column was just added", which is why a derivation fix could previously never reach old rows.
+
 ## [0.9.11] - 2026-10-22
 
 ### Changed
