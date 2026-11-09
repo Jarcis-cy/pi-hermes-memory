@@ -44,6 +44,7 @@ import { registerPrinciplePinCommand } from "./handlers/principle-pin.js";
 import { registerPrincipleRetireCommand } from "./handlers/principle-retire.js";
 import { setupSessionFlush } from "./handlers/session-flush.js";
 import { registerInsightsCommand } from "./handlers/insights.js";
+import { registerBackfillTagsCommand } from "./handlers/backfill-tags.js";
 import { triggerConsolidation, registerConsolidateCommand } from "./handlers/auto-consolidate.js";
 import { setupCorrectionDetector } from "./handlers/correction-detector.js";
 import { registerSkillsCommand } from "./handlers/skills-command.js";
@@ -423,6 +424,7 @@ export default function (pi: ExtensionAPI) {
 
   // ── 9. Register commands ──
   registerInsightsCommand(memoryPi, store, projectStoreRef, projectNameRef, dbManager);
+  registerBackfillTagsCommand(memoryPi, dbManager, config);
   registerConcretionCommand(memoryPi, dbManager, globalDir, config);
   registerMemoryConflictsCommand(
     memoryPi,

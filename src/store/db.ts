@@ -1210,6 +1210,9 @@ export class DatabaseManager {
     if (!names.has('entities')) {
       db.exec('ALTER TABLE memory_events ADD COLUMN entities TEXT');
     }
+    if (!names.has('semantic_tags')) {
+      db.exec('ALTER TABLE memory_events ADD COLUMN semantic_tags TEXT');
+    }
     // Unconditional on purpose: the version key decides whether the ledger is
     // re-derived, so this cannot be gated behind "column was just added".
     this.backfillMemoryEventEntities(db);

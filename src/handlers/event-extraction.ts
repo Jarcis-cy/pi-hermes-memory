@@ -8,6 +8,7 @@ import {
   type EventScope,
   type EventSource,
   type MemoryEventDraft,
+  normalizeSemanticTags,
 } from "../store/event-memory-store.js";
 import type { MemoryConfig } from "../types.js";
 import { execChildPrompt, cleanChildStderr } from "./pi-child-process.js";
@@ -51,12 +52,19 @@ Respond with JSON only:
       "scope": "project",
       "kind": "correction",
       "content": "Concrete description of what happened",
-      "evidence_quote": "Short verbatim supporting quote"
+      "evidence_quote": "Short verbatim supporting quote",
+      "topics": ["short-lowercase-topic-tags"]
     }
   ]
 }
 
 Allowed kind values: fact, preference, correction, failure, decision, outcome, insight, convention, tool-quirk.
+Topics: 0-4 tags naming what the event is ABOUT for later recall — component or
+system, tool, failure class, theme (e.g. "postgres-connection", "docker-daemon",
+"release-gate", "flaky-test"). Lowercase, hyphenated, in the words the event
+itself uses. Do NOT list ticket ids, ports, file paths, or dates (indexed
+separately); do NOT invent topics the event does not support. Omit the key or
+use [] when nothing fits.
 If nothing is worth preserving, return {"events":[]}.`;
 
 export interface EventExtractionInput {
@@ -99,7 +107,9 @@ export function parseEventExtractionResponse(text: string): MemoryEventDraft[] |
     const content = typeof event.content === "string" ? event.content.trim() : "";
     const evidenceQuote = typeof event.evidence_quote === "string" ? event.evidence_quote.trim() : "";
     if (!EVENT_SCOPES.has(scope) || !EVENT_KINDS.has(kind) || !content || !evidenceQuote) continue;
-    events.push({ scope, kind, content, evidenceQuote });
+    // Model-emitted topic tags ride along; capture-time normalization
+    // (charset, casing, cap) is the only gate they must survive.
+    events.push({ scope, kind, content, evidenceQuote, semanticTags: normalizeSemanticTags(event.topics) });
   }
   return events;
 }

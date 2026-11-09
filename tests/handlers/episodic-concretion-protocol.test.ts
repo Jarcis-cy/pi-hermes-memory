@@ -22,6 +22,7 @@ describe("event extraction protocol", () => {
       kind: "correction",
       content: "The user corrected a project-specific narrative.",
       evidenceQuote: "That is one outfit, not five outfits.",
+      semanticTags: [],
     }]);
   });
 

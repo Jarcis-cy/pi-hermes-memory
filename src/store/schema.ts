@@ -151,7 +151,11 @@ export const SCHEMA_SQL = `
     hit_count INTEGER NOT NULL DEFAULT 0,
     last_hit_at DATE,
     -- Structured facet index: '|tag1|tag2|' tokens (tickets, repos, paths).
-    entities TEXT
+    entities TEXT,
+    -- Model-emitted semantic topics ('|a|b|' tokens): components, failure
+    -- classes, themes. Separate from entities so deterministic re-derivation
+    -- (EVENT_ENTITIES_VERSION) never touches them; NULL until backfilled.
+    semantic_tags TEXT
   );
 
   CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_events_capture_identity

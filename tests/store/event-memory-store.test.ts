@@ -1316,4 +1316,47 @@ describe("event-memory-store", () => {
     assert.equal(empty.events.length, 0, "no lexical hit means nothing to join from");
     assert.equal(empty.joinedCount, 0);
   });
+
+  it("stores normalized semantic tags and joins through them", () => {
+    captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "failure",
+      content: "Gateway restart fixed connection resets on :25434",
+      evidenceQuote: "Gateway restart",
+      // Bad casing, a duplicate after normalization, a too-short tag, and an
+      // over-cap fifth tag — normalization must collapse all of it.
+      semanticTags: ["Postgres Connection", "postgres connection", "ab", "release-gate", "fifth-wheel"],
+    }], { captureId: "cap-s1", source: "background-review", sourceSessionId: "s-s1", project: "demo" });
+    captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "insight",
+      content: "Pool exhaustion stalled the ingest queue",
+      evidenceQuote: "Pool exhaustion",
+      semanticTags: ["postgres-connection"],
+    }], { captureId: "cap-s2", source: "background-review", sourceSessionId: "s-s2", project: "demo" });
+
+    const ledger = getMemoryEvents(dbManager, { limit: 10 });
+    const seed = ledger.find((event) => event.content.includes("Gateway restart"))!;
+    assert.deepEqual(
+      seed.semanticTags,
+      ["postgres-connection", "release-gate", "fifth-wheel"],
+      "casing/duplicates/charset/cap are normalized at capture",
+    );
+
+    // The mate shares only the semantic tag: no lexical overlap with the
+    // query, so only the second hop can surface it.
+    const outcome = searchMemoryEventsDetailed(dbManager, "gateway restart connection resets", {
+      limit: 10,
+      expandByEntity: {},
+    });
+    const mate = outcome.events.find((event) => event.content.includes("Pool exhaustion"));
+    assert.ok(mate, "the semantic-tag mate joins the result");
+    assert.ok(outcome.joinedTags.includes("postgres-connection"), "the semantic tag is reported as the bridge");
+    assert.equal(
+      searchMemoryEvents(dbManager, "gateway restart connection resets", { limit: 10 })
+        .some((event) => event.content.includes("Pool exhaustion")),
+      false,
+      "without the option the lexical ladder cannot see it",
+    );
+  });
 });

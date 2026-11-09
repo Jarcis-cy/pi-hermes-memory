@@ -52,6 +52,10 @@ export interface MemoryEventDraft {
   evidenceQuote?: string | null;
   /** Explicit facet tags; when omitted they are derived from the text. */
   entities?: string[];
+  /** Model-emitted semantic tags (topics, components, failure classes) —
+   * normalized at capture into the same token charset as entity tags but
+   * stored separately so deterministic re-derivation never touches them. */
+  semanticTags?: string[];
 }
 
 export interface MemoryEvent {
@@ -74,6 +78,8 @@ export interface MemoryEvent {
   lastHitAt: string | null;
   /** Lowercase facet tags ('|tag1|tag2|' storage split into an array). */
   entities: string[];
+  /** Model-emitted semantic topics ('|tag1|tag2|' storage split into an array). */
+  semanticTags: string[];
 }
 
 export interface CaptureEventsOptions {
@@ -183,6 +189,27 @@ function serializeEntityTokens(entities: string[]): string | null {
   return `|${entities.join("|")}|`;
 }
 
+/** normalizeSemanticTags coerces model-emitted topic tags into the same token
+ * shape the deterministic entity tags use: lowercase, runs of whitespace
+ * collapsed to '-', restricted to [a-z0-9@._/-], 3-60 chars, at most
+ * `max` unique tags in first-seen order. Anything that survives is safe for
+ * the '|a|b|' LIKE facet and cannot corrupt the query grammar. */
+export function normalizeSemanticTags(raw: unknown, max = 4): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const tags: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const tag = item.toLowerCase().trim().replace(/\s+/g, "-").replace(/[^a-z0-9@._/-]/g, "");
+    if (tag.length < 3 || tag.length > 60) continue;
+    if (seen.has(tag)) continue;
+    seen.add(tag);
+    tags.push(tag);
+    if (tags.length >= max) break;
+  }
+  return tags;
+}
+
 function mapEventRow(row: Record<string, unknown>): MemoryEvent {
   return {
     id: Number(row.id),
@@ -201,6 +228,7 @@ function mapEventRow(row: Record<string, unknown>): MemoryEvent {
     hitCount: row.hit_count == null ? 0 : Number(row.hit_count),
     lastHitAt: cleanNullable(row.last_hit_at as string | null),
     entities: parseEntityTokens(row.entities as string | null),
+    semanticTags: parseEntityTokens(row.semantic_tags as string | null),
   };
 }
 
@@ -253,8 +281,8 @@ export function captureMemoryEvents(
   const insert = db.prepare(`
     INSERT OR IGNORE INTO memory_events (
       capture_id, project, scope, kind, content, evidence_quote, source,
-      source_session_id, occurred_at, created_at, entities
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      source_session_id, occurred_at, created_at, entities, semantic_tags
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const find = db.prepare(`
     SELECT id
@@ -295,6 +323,7 @@ export function captureMemoryEvents(
       const entities = serializeEntityTokens(
         draft.entities?.length ? draft.entities.flatMap((entity) => deriveEventEntities(entity)) : deriveEventEntities(content, evidenceQuote),
       );
+      const semanticTags = draft.semanticTags?.length ? serializeEntityTokens(normalizeSemanticTags(draft.semanticTags)) : null;
       const inserted = insert.run(
         captureId,
         scopedProject,
@@ -307,6 +336,7 @@ export function captureMemoryEvents(
         occurredAt,
         createdAt,
         entities,
+        semanticTags,
       ) as { changes: number; lastInsertRowid: number | bigint };
 
       if (inserted.changes > 0) {
@@ -681,7 +711,10 @@ function expandPrimaryByEntityTags(
   const returnedIds = new Set(primary.map((event) => event.id));
   const tagOrder: string[] = [];
   for (const event of primary.slice(0, seedCount)) {
-    for (const tag of event.entities ?? []) {
+    // Both tag families donate join keys: deterministic entities (identifiers)
+    // and model-emitted semantic topics. Duplicates across the two lists are
+    // removed by the tagOrder membership check below.
+    for (const tag of [...(event.entities ?? []), ...(event.semanticTags ?? [])]) {
       if (!tag || tagOrder.includes(tag)) continue;
       tagOrder.push(tag);
     }
@@ -701,9 +734,9 @@ function expandPrimaryByEntityTags(
     const row = db.prepare(`
       SELECT COUNT(*) AS n
       FROM memory_events e
-      WHERE e.entities LIKE ? ESCAPE '\\' AND ${excluded.sql}
+      WHERE (e.entities LIKE ? ESCAPE '\\' OR e.semantic_tags LIKE ? ESCAPE '\\') AND ${excluded.sql}
         ${conditions.length ? `AND ${conditions.join(" AND ")}` : ""}
-    `).get(entityLikePattern(tag), ...excluded.params, ...params) as { n: number };
+    `).get(entityLikePattern(tag), entityLikePattern(tag), ...excluded.params, ...params) as { n: number };
     // Zero means nothing new to join; over the cap means the tag names half
     // the ledger's subject and would flood, not bridge.
     if (row.n === 0 || row.n > maxTagEvents) continue;
@@ -722,11 +755,11 @@ function expandPrimaryByEntityTags(
     const rows = db.prepare(`
       SELECT e.*
       FROM memory_events e
-      WHERE e.entities LIKE ? ESCAPE '\\' AND ${excluded.sql}
+      WHERE (e.entities LIKE ? ESCAPE '\\' OR e.semantic_tags LIKE ? ESCAPE '\\') AND ${excluded.sql}
         ${conditions.length ? `AND ${conditions.join(" AND ")}` : ""}
       ORDER BY e.hit_count DESC, e.occurred_at DESC, e.id DESC
       LIMIT ?
-    `).all(entityLikePattern(tag), ...excluded.params, ...params, perTag) as Record<string, unknown>[];
+    `).all(entityLikePattern(tag), entityLikePattern(tag), ...excluded.params, ...params, perTag) as Record<string, unknown>[];
     let contributed = false;
     for (const row of rows) {
       if (joined.length >= maxExtra) break;
