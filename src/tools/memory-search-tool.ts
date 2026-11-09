@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { DatabaseManager } from '../store/db.js';
 import { searchMemories, getMemoryStats, recordSearchHits } from '../store/sqlite-memory-store.js';
-import { recordEventHits, recordPrincipleHits, searchMemoryEvents, searchPrinciples } from '../store/event-memory-store.js';
+import { recordEventHits, recordPrincipleHits, searchMemoryEventsDetailed, searchPrinciples } from '../store/event-memory-store.js';
 import type { MemoryCategory } from '../types.js';
 import { createSharedToolResultRenderer } from './shared-output-view.js';
 import { searchResultView } from './tool-result-views.js';
@@ -95,12 +95,20 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
         scope: target === 'user' ? 'user' : target === 'failure' ? undefined : target === 'memory' ? (project ? 'project' : 'global') : undefined,
         limit: principleLimit,
       });
-      const events = searchMemoryEvents(dbManager, query, {
+      // Entity-tag second hop: measured zero recall gain on real queries
+      // (scripts/eval-entity-join.ts, 2026-11-09: 52.2% -> 52.2%, 12 evaluated,
+      // 37 joined events all outside deterministic gold) because today's tags
+      // are content-substring-derived and the trigram FTS already finds those
+      // substrings lexically. Flip this on once ingest-time semantic tags
+      // exist; the plumbing and tests stay.
+      const ENTITY_JOIN_ENABLED = false;
+      const { events, joinedCount, joinedTags } = searchMemoryEventsDetailed(dbManager, query, {
         project: project === undefined ? undefined : project,
         scope: eventScope,
         ...(category ? { kind: category } : {}),
         ...(entity ? { entity } : {}),
         limit,
+        ...(entity || !ENTITY_JOIN_ENABLED ? {} : { expandByEntity: {} }),
       });
       const eventContents = new Set(events.map((event) => event.content));
       const legacyLimit = Math.max(0, limit - events.length - principles.length);
@@ -146,6 +154,10 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
         output += `   Occurred: ${event.occurredAt} | Source: ${event.source}\n`;
         if (event.evidenceQuote) output += `   Evidence: "${event.evidenceQuote}"\n`;
         output += `\n`;
+      }
+
+      if (joinedCount > 0) {
+        output += `🔗 +${joinedCount} joined via shared entity tags (${joinedTags.join(", ")}) — same subject as the results above, no direct query-term match; check relevance before citing.\n\n`;
       }
 
       for (const entry of legacy) {

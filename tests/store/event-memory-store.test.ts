@@ -18,6 +18,7 @@ import {
   getPrincipleUsageSignals,
   recordEventHits,
   searchMemoryEvents,
+  searchMemoryEventsDetailed,
   principleStrength,
   recordPrincipleFeedback,
   recordPrincipleHits,
@@ -1174,5 +1175,145 @@ describe("event-memory-store", () => {
     const indexLine = rendered.split("\n").find((line) => /^P\d+ \[/.test(line))!;
     assert.ok(indexLine, "index carries at least one principle line");
     assert.ok(indexLine.length <= 90, "index lines stay short");
+  });
+
+  it("joins same-tag events via the entity second hop only when opted in", () => {
+    const seedContent = "Gateway restart fixed connection resets on :25434 for code-audit-dev-postgres";
+    const seed = captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "outcome",
+      content: seedContent,
+      evidenceQuote: "Gateway restart fixed connection resets",
+    }], { captureId: "cap-1", source: "background-review", sourceSessionId: "s-1", project: "demo" });
+    assert.equal(seed.inserted, 1);
+    const seedTags = deriveEventEntities(seedContent);
+    assert.ok(seedTags.includes("port-25434"), `seed tags carry the port: ${seedTags.join(",")}`);
+    assert.ok(seedTags.includes("code-audit-dev-postgres"), `seed tags carry the container: ${seedTags.join(",")}`);
+
+    const mate = captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "fact",
+      content: "Backfill job for code-audit-dev-postgres reindexed every ledger row",
+      evidenceQuote: "Backfill job",
+    }], { captureId: "cap-2", source: "background-review", sourceSessionId: "s-2", project: "demo" });
+    captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "fact",
+      content: "Unrelated note about vue linting conventions",
+      evidenceQuote: "Unrelated note",
+    }], { captureId: "cap-3", source: "background-review", sourceSessionId: "s-3", project: "demo" });
+    assert.equal(mate.inserted, 1);
+
+    const ledger = getMemoryEvents(dbManager, { limit: 10 });
+    const seedEvent = ledger.find((event) => event.content === seedContent)!;
+    const mateEvent = ledger.find((event) => event.content.includes("Backfill job"))!;
+    assert.ok(seedEvent && mateEvent, "both captured events are in the ledger");
+
+    // Off by default: the legacy signature must not surface the tag mate.
+    const plain = searchMemoryEvents(dbManager, "gateway restart connection resets", { limit: 10 });
+    const plainIds = plain.map((event) => event.id);
+    assert.ok(plainIds.includes(seedEvent.id), "the lexical hit comes back");
+    assert.equal(plainIds.includes(mateEvent.id), false, "no second hop without the option");
+
+    // Opted in: the tag mate joins after the primary hits, labeled by tag.
+    const outcome = searchMemoryEventsDetailed(dbManager, "gateway restart connection resets", {
+      limit: 10,
+      expandByEntity: {},
+    });
+    const outcomeIds = outcome.events.map((event) => event.id);
+    assert.ok(outcomeIds.includes(mateEvent.id), "the same-tag event joins the result");
+    assert.ok(outcomeIds.indexOf(seedEvent.id) < outcomeIds.indexOf(mateEvent.id), "joined events sort after primary hits");
+    assert.ok(outcome.joinedTags.includes("code-audit-dev-postgres"), "the bridging tag is reported");
+    assert.ok(outcome.joinedCount >= 1, "the join count is reported");
+    assert.equal(outcome.events.some((event) => event.content.includes("vue linting")), false, "unrelated events stay out");
+  });
+
+  it("keeps joined events inside the active filters", () => {
+    captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "outcome",
+      content: "Gateway restart fixed connection resets on :25434 for code-audit-dev-postgres",
+      evidenceQuote: "Gateway restart",
+    }], { captureId: "cap-a", source: "background-review", sourceSessionId: "s-a", project: "demo" });
+    captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "fact",
+      content: "Backfill job for code-audit-dev-postgres reindexed every ledger row",
+      evidenceQuote: "Backfill job",
+    }], { captureId: "cap-b", source: "background-review", sourceSessionId: "s-b", project: "other" });
+
+    const scoped = searchMemoryEventsDetailed(dbManager, "gateway restart connection resets", {
+      project: "demo",
+      limit: 10,
+      expandByEntity: {},
+    });
+    assert.equal(scoped.joinedCount, 0, "tag mates outside the project filter do not join");
+    assert.equal(scoped.events.every((event) => event.project === "demo"), true);
+  });
+
+  it("skips tags that are too broad to be evidence of an association", () => {
+    captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "outcome",
+      content: "Gateway restart fixed connection resets on :25434 for code-audit-dev-postgres",
+      evidenceQuote: "Gateway restart",
+    }], { captureId: "cap-seed", source: "background-review", sourceSessionId: "s-seed", project: "demo" });
+    for (let index = 0; index < 52; index += 1) {
+      captureMemoryEvents(dbManager, [{
+        scope: "project",
+        kind: "fact",
+        content: `Routine note ${index} about code-audit-dev-postgres capacity planning`,
+        evidenceQuote: "Routine note",
+      }], { captureId: `cap-broad-${index}`, source: "background-review", sourceSessionId: `s-broad-${index}`, project: "demo" });
+    }
+
+    const outcome = searchMemoryEventsDetailed(dbManager, "gateway restart connection resets", {
+      limit: 10,
+      expandByEntity: {},
+    });
+    assert.equal(outcome.joinedCount, 0, "a tag matched by 52 unseen events exceeds the default cap of 50");
+  });
+
+  it("does not expand when the entity facet filter is active", () => {
+    captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "outcome",
+      content: "Gateway restart fixed connection resets on :25434 for code-audit-dev-postgres",
+      evidenceQuote: "Gateway restart",
+    }], { captureId: "cap-f1", source: "background-review", sourceSessionId: "s-f1", project: "demo" });
+    captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "fact",
+      content: "Backfill job for code-audit-dev-postgres reindexed every ledger row",
+      evidenceQuote: "Backfill job",
+    }], { captureId: "cap-f2", source: "background-review", sourceSessionId: "s-f2", project: "demo" });
+
+    // The entity facet ANDs with the FTS query: the tag mate carries none of
+    // the query terms, so only the lexical hit comes back — and the second
+    // hop must stay off because the caller already chose the tag.
+    const faceted = searchMemoryEventsDetailed(dbManager, "gateway restart connection resets", {
+      entity: "code-audit-dev-postgres",
+      limit: 10,
+      expandByEntity: {},
+    });
+    assert.ok(faceted.events.length >= 1, "the facet filter returns the lexical hit");
+    assert.equal(faceted.events.every((event) => event.entities.includes("code-audit-dev-postgres")), true, "every result carries the facet tag");
+    assert.equal(faceted.joinedCount, 0, "no second hop when the caller already chose the tag");
+  });
+
+  it("does not expand when the primary search finds nothing", () => {
+    captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "outcome",
+      content: "Gateway restart fixed connection resets on :25434 for code-audit-dev-postgres",
+      evidenceQuote: "Gateway restart",
+    }], { captureId: "cap-e1", source: "background-review", sourceSessionId: "s-e1", project: "demo" });
+
+    const empty = searchMemoryEventsDetailed(dbManager, "zzzqqqxxx wwwvvvuuu", {
+      limit: 10,
+      expandByEntity: {},
+    });
+    assert.equal(empty.events.length, 0, "no lexical hit means nothing to join from");
+    assert.equal(empty.joinedCount, 0);
   });
 });

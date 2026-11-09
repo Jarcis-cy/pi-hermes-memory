@@ -495,6 +495,38 @@ const EVENT_HIT_BONUS_PER_HIT = 0.02;
 /** Bonus ceiling in hits: 50 recalls = full 1.0 bonus, further hits add none. */
 const EVENT_HIT_BONUS_MAX_HITS = 50;
 
+/** Tuning knobs for the entity-tag second hop. Defaults are deliberately
+ * conservative: a few seed events, a few tags, and a document-frequency cap
+ * so a tag shared by half the ledger cannot flood the result. */
+export interface EntityExpansionOptions {
+  /** How many top-ranked hits donate their entity tags (default 3). */
+  seedCount?: number;
+  /** Maximum tags to join on (default 4). */
+  maxTags?: number;
+  /** Skip tags matching more than this many unseen events (default 50). */
+  maxTagEvents?: number;
+  /** Maximum joined events to append (default: half the result limit). */
+  maxExtra?: number;
+}
+
+/** EventSearchOutcome is what memory_search consumes: the ranked events plus
+ * what the entity-tag second hop contributed, so the tool can label joined
+ * results honestly instead of presenting them as direct query matches. */
+export interface EventSearchOutcome {
+  events: MemoryEvent[];
+  /** Tags that each contributed at least one joined event, in seed-rank order. */
+  joinedTags: string[];
+  joinedCount: number;
+}
+
+const DEFAULT_EXPANSION_SEEDS = 3;
+const DEFAULT_EXPANSION_TAGS = 4;
+const DEFAULT_EXPANSION_TAG_EVENTS = 50;
+
+function entityLikePattern(tag: string): string {
+  return `%|${tag.replace(/[\\%_]/g, (ch) => `\\${ch}`)}|%`;
+}
+
 export function searchMemoryEvents(
   dbManager: DatabaseManager,
   query: string,
@@ -506,18 +538,42 @@ export function searchMemoryEvents(
     /** Facet filter: matches one normalized entity tag (e.g. 'iar-1839'). */
     entity?: string;
     limit?: number;
+    /** Opt-in entity-tag second hop. Off by default so existing callers
+     * (task prefetch, tests) keep their byte-identical behavior. */
+    expandByEntity?: EntityExpansionOptions;
   } = {},
 ): MemoryEvent[] {
+  return searchMemoryEventsDetailed(dbManager, query, options).events;
+}
+
+/** searchMemoryEventsDetailed runs the same lexical ladder as
+ * searchMemoryEvents and, when `expandByEntity` is set, appends the entity-tag
+ * second hop. It reports which tags joined how many events so callers can
+ * label the addition; see expandPrimaryByEntityTags for the join contract. */
+export function searchMemoryEventsDetailed(
+  dbManager: DatabaseManager,
+  query: string,
+  options: {
+    project?: string | null;
+    scope?: EventScope;
+    kind?: EventKind;
+    source?: EventSource;
+    /** Facet filter: matches one normalized entity tag (e.g. 'iar-1839'). */
+    entity?: string;
+    limit?: number;
+    expandByEntity?: EntityExpansionOptions;
+  } = {},
+): EventSearchOutcome {
   const normalized = normalizeFts5Query(query);
-  if (!normalized) return [];
+  if (!normalized) return { events: [], joinedTags: [], joinedCount: 0 };
   const db = dbManager.getDb();
   const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
   let parseError = false;
   const entityTag = options.entity?.trim().toLowerCase() || null;
 
-  const run = (matchQuery: string): MemoryEvent[] => {
-    const conditions = ["event_fts MATCH ?"];
-    const params: unknown[] = [matchQuery];
+  const filterConditions = (): { conditions: string[]; params: unknown[] } => {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
     if (options.project !== undefined) {
       if (options.project === null) conditions.push("e.project IS NULL");
       else {
@@ -537,9 +593,16 @@ export function searchMemoryEvents(
       conditions.push("e.source = ?");
       params.push(options.source);
     }
+    return { conditions, params };
+  };
+
+  const run = (matchQuery: string): MemoryEvent[] => {
+    const { conditions, params } = filterConditions();
+    conditions.unshift("event_fts MATCH ?");
+    params.unshift(matchQuery);
     if (entityTag) {
       conditions.push("e.entities LIKE ? ESCAPE '\\'");
-      params.push(`%|${entityTag.replace(/[\\%_]/g, (ch) => `\\${ch}`)}|%`);
+      params.push(entityLikePattern(entityTag));
     }
     try {
       // Relevance first: BM25 (lower is better), minus the bounded usage bonus.
@@ -564,18 +627,122 @@ export function searchMemoryEvents(
     }
   };
 
-  const exact = run(normalized);
-  if (exact.length) return exact;
-  if (parseError) {
-    const natural = normalizeNaturalLanguageFts5Query(query);
-    if (!natural || natural === normalized) return [];
-    const results = run(natural);
-    if (results.length) return results;
-    const fallback = buildNaturalLanguageFallbackQuery(query);
-    return fallback && fallback !== natural ? run(fallback) : results;
+  const resolvePrimary = (): MemoryEvent[] => {
+    const exact = run(normalized);
+    if (exact.length) return exact;
+    if (parseError) {
+      const natural = normalizeNaturalLanguageFts5Query(query);
+      if (!natural || natural === normalized) return [];
+      const results = run(natural);
+      if (results.length) return results;
+      const naturalFallback = buildNaturalLanguageFallbackQuery(query);
+      return naturalFallback && naturalFallback !== natural ? run(naturalFallback) : results;
+    }
+    const fallback = buildFallbackFts5Query(query);
+    return fallback && fallback !== normalized ? run(fallback) : exact;
+  };
+
+  const primary = resolvePrimary();
+  if (!options.expandByEntity || entityTag || primary.length === 0) {
+    return { events: primary, joinedTags: [], joinedCount: 0 };
   }
-  const fallback = buildFallbackFts5Query(query);
-  return fallback && fallback !== normalized ? run(fallback) : exact;
+  return expandPrimaryByEntityTags(dbManager, primary, limit, filterConditions, options.expandByEntity);
+}
+
+/** expandPrimaryByEntityTags is the entity-tag second hop (SAG1-style join,
+ * zero model calls): the top hits of the lexical search donate their entity
+ * tags, and events sharing a tag but not the query vocabulary are appended
+ * after the primary results, ranked by usage evidence and recency — they have
+ * no lexical score by construction, so the ranking signal is what the ledger
+ * already knows about them.
+ *
+ * Contract: never runs when the primary search is empty (nothing to join
+ * from) or an explicit entity filter is active (the caller already chose the
+ * tag); joined events respect every other active filter (project, scope,
+ * kind, source); tags matching more than `maxTagEvents` unseen events are
+ * skipped as too broad to be evidence of an association; the combined result
+ * is capped at `limit`. Pure read: never writes, never throws on empty tags. */
+function expandPrimaryByEntityTags(
+  dbManager: DatabaseManager,
+  primary: MemoryEvent[],
+  limit: number,
+  filterConditions: () => { conditions: string[]; params: unknown[] },
+  options: EntityExpansionOptions,
+): EventSearchOutcome {
+  const db = dbManager.getDb();
+  const seedCount = Math.max(1, options.seedCount ?? DEFAULT_EXPANSION_SEEDS);
+  const maxTags = Math.max(1, options.maxTags ?? DEFAULT_EXPANSION_TAGS);
+  const maxTagEvents = Math.max(1, options.maxTagEvents ?? DEFAULT_EXPANSION_TAG_EVENTS);
+  const maxExtra = Math.max(0, options.maxExtra ?? Math.floor(limit / 2));
+
+  const noExpansion: EventSearchOutcome = { events: primary, joinedTags: [], joinedCount: 0 };
+  if (maxExtra === 0 || primary.length >= limit) return noExpansion;
+
+  const returnedIds = new Set(primary.map((event) => event.id));
+  const tagOrder: string[] = [];
+  for (const event of primary.slice(0, seedCount)) {
+    for (const tag of event.entities ?? []) {
+      if (!tag || tagOrder.includes(tag)) continue;
+      tagOrder.push(tag);
+    }
+  }
+  if (tagOrder.length === 0) return noExpansion;
+
+  const notInClause = (ids: Set<number>): { sql: string; params: number[] } =>
+    ids.size === 0
+      ? { sql: "1=1", params: [] }
+      : { sql: `e.id NOT IN (${[...ids].map(() => "?").join(", ")})`, params: [...ids] };
+
+  const eligibleTags: string[] = [];
+  for (const tag of tagOrder) {
+    if (eligibleTags.length >= maxTags) break;
+    const { conditions, params } = filterConditions();
+    const excluded = notInClause(returnedIds);
+    const row = db.prepare(`
+      SELECT COUNT(*) AS n
+      FROM memory_events e
+      WHERE e.entities LIKE ? ESCAPE '\\' AND ${excluded.sql}
+        ${conditions.length ? `AND ${conditions.join(" AND ")}` : ""}
+    `).get(entityLikePattern(tag), ...excluded.params, ...params) as { n: number };
+    // Zero means nothing new to join; over the cap means the tag names half
+    // the ledger's subject and would flood, not bridge.
+    if (row.n === 0 || row.n > maxTagEvents) continue;
+    eligibleTags.push(tag);
+  }
+  if (eligibleTags.length === 0) return noExpansion;
+
+  const perTag = Math.max(1, Math.ceil(maxExtra / eligibleTags.length));
+  const seenIds = new Set(returnedIds);
+  const joined: MemoryEvent[] = [];
+  const joinedTags: string[] = [];
+  for (const tag of eligibleTags) {
+    if (joined.length >= maxExtra) break;
+    const { conditions, params } = filterConditions();
+    const excluded = notInClause(seenIds);
+    const rows = db.prepare(`
+      SELECT e.*
+      FROM memory_events e
+      WHERE e.entities LIKE ? ESCAPE '\\' AND ${excluded.sql}
+        ${conditions.length ? `AND ${conditions.join(" AND ")}` : ""}
+      ORDER BY e.hit_count DESC, e.occurred_at DESC, e.id DESC
+      LIMIT ?
+    `).all(entityLikePattern(tag), ...excluded.params, ...params, perTag) as Record<string, unknown>[];
+    let contributed = false;
+    for (const row of rows) {
+      if (joined.length >= maxExtra) break;
+      const event = mapEventRow(row);
+      seenIds.add(event.id);
+      joined.push(event);
+      contributed = true;
+    }
+    if (contributed) joinedTags.push(tag);
+  }
+  if (joined.length === 0) return noExpansion;
+  return {
+    events: [...primary, ...joined].slice(0, limit),
+    joinedTags,
+    joinedCount: joined.length,
+  };
 }
 
 function sourceIdsForPrinciples(dbManager: DatabaseManager, principleIds: number[]): Map<number, number[]> {
