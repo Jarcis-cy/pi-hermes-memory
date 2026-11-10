@@ -749,7 +749,15 @@ export function searchMemoryEventsDetailed(
     // such contract, and there the weakest lexical tail gives up its slots
     // rather than hiding every on-topic event behind generic word matches. The
     // head of the lexical ranking is never displaced either way.
-    const exactLookup = extractTaskTerms(query).some(isIdentifierTerm);
+    // Narrower than isIdentifierTerm on purpose: that helper also treats any
+    // 6+ character word as machine-generated (it exists to decide whether a
+    // mixed-language prompt has anything the English ledger can match). For
+    // this displacement decision the signal must be an actual machine name — a
+    // digit or a separator — otherwise ordinary topic words like "council" or
+    // "release" would freeze the page and the concept path would never fire.
+    const exactLookup = extractTaskTerms(query).some(
+      (term) => isIdentifierTerm(term) && /[0-9._/]/.test(term),
+    );
     const room = Math.max(0, limit - events.length);
     const options2 = exactLookup ? { ...options.lookupByTag, maxExtra: room } : options.lookupByTag;
     const matched = appendTagCarriers(dbManager, events, limit, filterConditions, query, options2);

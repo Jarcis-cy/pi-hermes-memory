@@ -105,9 +105,9 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
       // Forward tag lookup: the query's words are matched against the semantic
       // tag index, so an event can surface for the topic it is about even when
       // its content shares no query word. Measured 2026-11-10 on the live
-      // ledger: concept-recall gold 1/120 -> 21/120, on-topic share 37% -> 43%,
-      // identifier-query recall unchanged (72/141), median +0.3ms on searched
-      // queries because the index is a b-tree key probe, not a table scan.
+      // ledger: concept-recall gold 1/120 -> 23/120, on-topic rows in the page
+      // 217 -> 286 of 600, identifier-query recall unchanged (72/141), median
+      // +0.5ms because the index is a b-tree key probe, not a table scan.
       const TAG_LOOKUP_ENABLED = true;
       const { events, joinedCount, joinedTags, tagMatchedCount, tagMatchedTags } = searchMemoryEventsDetailed(dbManager, query, {
         project: project === undefined ? undefined : project,
