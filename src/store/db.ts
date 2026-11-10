@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { EVENT_ENTITIES_VERSION, deriveEventEntities } from "./event-entities.js";
+import { indexKeysForStoredTags } from "./tag-index.js";
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import { SCHEMA_SQL } from './schema.js';
@@ -79,6 +80,10 @@ export const FTS5_MIGRATION_MAX_LOCK_ATTEMPTS = 3;
 
 const FTS5_TOKENIZER_VERSION_KEY = 'fts5_tokenizer_version';
 const EVENT_ENTITIES_VERSION_KEY = 'event_entities_version';
+/** Version of the forward-tag index shape. Bumping it forces one rebuild, the
+ * same contract EVENT_ENTITIES_VERSION uses for deterministic facets. */
+const EVENT_TAG_INDEX_VERSION = '1';
+const EVENT_TAG_INDEX_VERSION_KEY = 'event_tag_index_version';
 const FTS5_TOKENIZER_VERSION = 'trigram-v1';
 const FTS5_TRIGRAM_TABLES = {
   message: `CREATE VIRTUAL TABLE message_fts USING fts5(
@@ -1216,6 +1221,53 @@ export class DatabaseManager {
     // Unconditional on purpose: the version key decides whether the ledger is
     // re-derived, so this cannot be gated behind "column was just added".
     this.backfillMemoryEventEntities(db);
+    this.backfillMemoryEventTagIndex(db);
+  }
+
+  /** One-time build of the forward tag index (memory_event_tags).
+   *
+   * Contract: idempotent and versioned — a matching version key is a no-op, so
+   * every session start costs one metadata read; a stale or missing key rebuilds
+   * the whole index inside one transaction. Rows whose tags were written by older
+   * code (or by the backfill command before this index existed) are picked up
+   * here, so the index never depends on the write path having been live.
+   * An empty ledger grows no metadata row. */
+  private backfillMemoryEventTagIndex(db: DatabaseLike): void {
+    const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memory_event_tags'").get() as { name: string } | undefined;
+    if (!tableExists) return;
+    const versionRow = db.prepare(
+      "SELECT value FROM extension_metadata WHERE key = ?",
+    ).get(EVENT_TAG_INDEX_VERSION_KEY) as { value?: string } | undefined;
+    if (versionRow?.value === EVENT_TAG_INDEX_VERSION) return;
+    const tagged = db.prepare(
+      "SELECT id, semantic_tags FROM memory_events WHERE semantic_tags LIKE '|%|'",
+    ).all() as Array<{ id: number | bigint; semantic_tags: string | null }>;
+    if (tagged.length === 0) {
+      // Nothing to index — but record the version anyway so a ledger that has
+      // events and no tags (pre-backfill) does not repeat this scan on every
+      // session open. A genuinely empty ledger still grows no metadata row.
+      const anyEvent = db.prepare("SELECT 1 AS present FROM memory_events LIMIT 1").get() as { present?: number } | undefined;
+      if (anyEvent) {
+        db.prepare(
+          "INSERT OR REPLACE INTO extension_metadata (key, value) VALUES (?, ?)",
+        ).run(EVENT_TAG_INDEX_VERSION_KEY, EVENT_TAG_INDEX_VERSION);
+      }
+      return;
+    }
+
+    const insert = db.prepare("INSERT OR IGNORE INTO memory_event_tags (tag, event_id) VALUES (?, ?)");
+    const rebuild = () => {
+      db.prepare("DELETE FROM memory_event_tags").run();
+      for (const row of tagged) {
+        for (const key of indexKeysForStoredTags(row.semantic_tags)) insert.run(key, Number(row.id));
+      }
+      db.prepare(
+        "INSERT OR REPLACE INTO extension_metadata (key, value) VALUES (?, ?)",
+      ).run(EVENT_TAG_INDEX_VERSION_KEY, EVENT_TAG_INDEX_VERSION);
+    };
+    const transaction = db.transaction?.(rebuild);
+    if (transaction) transaction();
+    else rebuild();
   }
 
   /** One-time facet backfill: rows captured before the entities column existed

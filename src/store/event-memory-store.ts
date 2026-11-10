@@ -14,8 +14,9 @@ import {
   normalizeFts5Query,
   normalizeNaturalLanguageFts5Query,
 } from "./fts-query.js";
-import { TASK_RELEVANCE_STRONG, extractTaskTerms, scoreTaskRelevance } from "./task-terms.js";
+import { TASK_RELEVANCE_STRONG, extractTaskTerms, isIdentifierTerm, scoreTaskRelevance } from "./task-terms.js";
 import { scanContent } from "./content-scanner.js";
+import { tagIndexKeys } from "./tag-index.js";
 
 export type EventScope = "global" | "user" | "project";
 export type EventKind =
@@ -258,6 +259,25 @@ function eventRowById(dbManager: DatabaseManager, id: number): MemoryEvent | nul
   return row ? mapEventRow(row) : null;
 }
 
+/** indexEventSemanticTags writes one event's tags into the forward tag index.
+ *
+ * Contract: idempotent (INSERT OR IGNORE on the (tag, event_id) key), safe to
+ * call with an empty tag list, and required whenever `semantic_tags` is written
+ * — the index is what makes tag lookup indexed instead of a full-table scan.
+ * Callers already inside a transaction stay inside it; this never opens one. */
+export function indexEventSemanticTags(
+  dbManager: DatabaseManager,
+  eventId: number,
+  tags: string[],
+): void {
+  const keys = tagIndexKeys(tags);
+  if (keys.length === 0) return;
+  const insert = dbManager.getDb().prepare(
+    "INSERT OR IGNORE INTO memory_event_tags (tag, event_id) VALUES (?, ?)",
+  );
+  for (const key of keys) insert.run(key, eventId);
+}
+
 export function captureMemoryEvents(
   dbManager: DatabaseManager,
   drafts: MemoryEventDraft[],
@@ -323,7 +343,9 @@ export function captureMemoryEvents(
       const entities = serializeEntityTokens(
         draft.entities?.length ? draft.entities.flatMap((entity) => deriveEventEntities(entity)) : deriveEventEntities(content, evidenceQuote),
       );
-      const semanticTags = draft.semanticTags?.length ? serializeEntityTokens(normalizeSemanticTags(draft.semanticTags)) : null;
+      const normalizedSemanticTags = draft.semanticTags?.length ? normalizeSemanticTags(draft.semanticTags) : [];
+      const semanticTags = normalizedSemanticTags.length ? serializeEntityTokens(normalizedSemanticTags) : null;
+      const indexKeysInput = normalizedSemanticTags;
       const inserted = insert.run(
         captureId,
         scopedProject,
@@ -341,7 +363,14 @@ export function captureMemoryEvents(
 
       if (inserted.changes > 0) {
         result.inserted++;
-        result.eventIds.push(Number(inserted.lastInsertRowid));
+        const eventId = Number(inserted.lastInsertRowid);
+        result.eventIds.push(eventId);
+        // Keep the forward tag index in step with the column it indexes.
+        // Index the tags as STORED, not as drafted: normalization lowercases,
+        // de-duplicates, and caps the list, so indexing the raw draft would
+        // create keys the column never had (phantom matches) and miss the ones
+        // the column carries (silent recall loss).
+        if (semanticTags) indexEventSemanticTags(dbManager, eventId, indexKeysInput);
         continue;
       }
 
@@ -544,9 +573,24 @@ export interface EntityExpansionOptions {
  * results honestly instead of presenting them as direct query matches. */
 export interface EventSearchOutcome {
   events: MemoryEvent[];
-  /** Tags that each contributed at least one joined event, in seed-rank order. */
+  /** Tags that each contributed at least one seed-hop event, in seed-rank order. */
   joinedTags: string[];
   joinedCount: number;
+  /** Candidate tags that matched carriers through the forward tag lookup. */
+  tagMatchedTags: string[];
+  tagMatchedCount: number;
+}
+
+/** Tuning knobs for the forward tag lookup. It answers a different question
+ * than the seed hop: "which events carry the topic the query names", which
+ * includes the cold-start case where no event matches the query lexically. */
+export interface TagLookupOptions {
+  /** Maximum tag-carrying events to append (default: half the result limit). */
+  maxExtra?: number;
+  /** Maximum candidate tags to match (default 6). */
+  maxTags?: number;
+  /** Skip tags matching more than this many unseen events (default 50). */
+  maxTagEvents?: number;
 }
 
 const DEFAULT_EXPANSION_SEEDS = 3;
@@ -571,6 +615,9 @@ export function searchMemoryEvents(
     /** Opt-in entity-tag second hop. Off by default so existing callers
      * (task prefetch, tests) keep their byte-identical behavior. */
     expandByEntity?: EntityExpansionOptions;
+    /** Opt-in forward tag lookup: surfaces events that carry the topic the
+     * query names even when their content shares no query word. Off by default. */
+    lookupByTag?: TagLookupOptions;
   } = {},
 ): MemoryEvent[] {
   return searchMemoryEventsDetailed(dbManager, query, options).events;
@@ -592,10 +639,11 @@ export function searchMemoryEventsDetailed(
     entity?: string;
     limit?: number;
     expandByEntity?: EntityExpansionOptions;
+    lookupByTag?: TagLookupOptions;
   } = {},
 ): EventSearchOutcome {
   const normalized = normalizeFts5Query(query);
-  if (!normalized) return { events: [], joinedTags: [], joinedCount: 0 };
+  if (!normalized) return { events: [], joinedTags: [], joinedCount: 0, tagMatchedTags: [], tagMatchedCount: 0 };
   const db = dbManager.getDb();
   const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
   let parseError = false;
@@ -673,10 +721,188 @@ export function searchMemoryEventsDetailed(
   };
 
   const primary = resolvePrimary();
-  if (!options.expandByEntity || entityTag || primary.length === 0) {
-    return { events: primary, joinedTags: [], joinedCount: 0 };
+  // An explicit entity filter means the caller already named the tag; both tag
+  // mechanisms would just echo that choice back.
+  if (entityTag) {
+    return { events: primary, joinedTags: [], joinedCount: 0, tagMatchedTags: [], tagMatchedCount: 0 };
   }
-  return expandPrimaryByEntityTags(dbManager, primary, limit, filterConditions, options.expandByEntity);
+
+  let events = primary;
+  let joinedTags: string[] = [];
+  let joinedCount = 0;
+  if (options.expandByEntity && primary.length > 0) {
+    const expanded = expandPrimaryByEntityTags(dbManager, primary, limit, filterConditions, options.expandByEntity);
+    events = expanded.events;
+    joinedTags = expanded.joinedTags;
+    joinedCount = expanded.joinedCount;
+  }
+
+  let tagMatchedTags: string[] = [];
+  let tagMatchedCount = 0;
+  if (options.lookupByTag) {
+    // Deliberately independent of `primary`: the cold-start case (query words
+    // appear in no event content, only in the tag index) is the reason this
+    // mechanism exists, so an empty lexical result must still get a lookup.
+    // A query carrying machine identifiers (ticket ids, ports, paths, repo
+    // slugs) is an exact lookup: its lexical hits ARE the target, so tag
+    // carriers may only use slots the ladder left empty. A concept query has no
+    // such contract, and there the weakest lexical tail gives up its slots
+    // rather than hiding every on-topic event behind generic word matches. The
+    // head of the lexical ranking is never displaced either way.
+    const exactLookup = extractTaskTerms(query).some(isIdentifierTerm);
+    const room = Math.max(0, limit - events.length);
+    const options2 = exactLookup ? { ...options.lookupByTag, maxExtra: room } : options.lookupByTag;
+    const matched = appendTagCarriers(dbManager, events, limit, filterConditions, query, options2);
+    if (matched.count > 0) {
+      // At least the single best lexical hit keeps its slot even when the page
+      // is smaller than the carrier budget (limit 1..5); without this floor a
+      // "give me the best match" request would return topical rows only.
+      const keepLexical = Math.max(Math.min(1, events.length), limit - matched.count);
+      events = [...events.slice(0, keepLexical), ...matched.events].slice(0, limit);
+      tagMatchedTags = matched.tags;
+      // Report only carriers that survived the final slice: with a small page the
+      // lexical floor can leave room for fewer than `matched.count`.
+      tagMatchedCount = Math.min(matched.count, Math.max(0, limit - keepLexical));
+    }
+  }
+
+  return { events, joinedTags, joinedCount, tagMatchedTags, tagMatchedCount };
+}
+
+/** Default candidate cap for the forward tag lookup. Each candidate costs one
+ * document-frequency probe, so the cap also bounds query latency. */
+const DEFAULT_TAG_LOOKUP_TAGS = 6;
+/** Default number of tag-matched events that may enter one result page. Small
+ * enough that a concept match cannot take over a page of ordinary lexical hits. */
+const DEFAULT_TAG_LOOKUP_EXTRA = 5;
+/** Query words too common to be a topic; they would match tens of thousands of
+ * tags' worth of noise before any breadth filter could help. */
+const TAG_LOOKUP_STOPWORDS = new Set([
+  "the", "and", "for", "with", "from", "that", "this", "was", "were", "are", "not",
+  "but", "has", "had", "have", "into", "onto", "when", "then", "than", "now", "why",
+  "how", "all", "any", "can", "did", "does", "done", "its", "itself", "just", "may",
+  "also", "after", "before", "still", "only", "over", "under", "about", "would",
+  "should", "could", "there", "these", "those", "they", "them", "what", "which",
+  "while", "your", "you", "our", "out", "off", "one", "two", "new", "old", "use",
+  "used", "using", "get", "got", "set",
+]);
+
+/** tagLookupCandidates turns a free-text query into candidate tag strings.
+ *
+ * Contract: only ASCII alphanumerics survive (tags are English by construction),
+ * tokens shorter than 3 characters, pure numbers, and stopwords are dropped, and
+ * n-grams are joined WITHOUT separators so `world map` matches both `world-map`
+ * and `worldmap` (the two spellings the tagger emits for one concept). Longer
+ * n-grams come first because they are the specific concepts; broad single words
+ * are tried last, where the document-frequency cap can reject them cheaply.
+ * Returns an empty list when the query has no usable ASCII token (e.g. a purely
+ * Chinese query cannot address an English tag index). */
+export function tagLookupCandidates(query: string, maxCandidates = DEFAULT_TAG_LOOKUP_TAGS): string[] {
+  const tokens = (query.toLowerCase().match(/[a-z0-9]+/g) ?? [])
+    .filter((token) => token.length >= 3 && !/^\d+$/.test(token) && !TAG_LOOKUP_STOPWORDS.has(token));
+  if (tokens.length === 0) return [];
+  const candidates: string[] = [];
+  const push = (candidate: string): void => {
+    if (candidate.length < 3 || candidate.length > 60) return;
+    if (!candidates.includes(candidate)) candidates.push(candidate);
+  };
+  for (let size = Math.min(3, tokens.length); size >= 1; size -= 1) {
+    for (let start = 0; start + size <= tokens.length; start += 1) {
+      push(tokens.slice(start, start + size).join(""));
+    }
+  }
+  return candidates.slice(0, Math.max(1, maxCandidates));
+}
+
+/** appendTagCarriers is the forward tag lookup: it matches the query's words
+ * against the semantic-tag index and appends the events that carry a matching
+ * topic, whether or not their content shares any query word.
+ *
+ * Contract: matches at tag-part granularity (`|world|map|` after splitting
+ * hyphens), so a single word reaches `map` and `world-map` alike, and compares
+ * the hyphen-stripped tag so `world-map` and `worldmap` are one concept; honours
+ * every active filter (project, scope, kind, source); never duplicates a row
+ * already returned; skips tags matching more than `maxTagEvents` unseen events
+ * so a ledger-wide topic cannot flood the answer; caps the addition at
+ * `maxExtra` and the combined result at `limit`. Pure read, never throws. */
+function appendTagCarriers(
+  dbManager: DatabaseManager,
+  existing: MemoryEvent[],
+  limit: number,
+  filterConditions: () => { conditions: string[]; params: unknown[] },
+  query: string,
+  options: TagLookupOptions,
+): { events: MemoryEvent[]; tags: string[]; count: number } {
+  const unchanged = { events: [], tags: [], count: 0 };
+  const maxExtra = Math.max(0, options.maxExtra ?? Math.min(DEFAULT_TAG_LOOKUP_EXTRA, limit));
+  if (maxExtra === 0) return unchanged;
+  const maxTags = Math.max(1, options.maxTags ?? DEFAULT_TAG_LOOKUP_TAGS);
+  const maxTagEvents = Math.max(1, options.maxTagEvents ?? DEFAULT_EXPANSION_TAG_EVENTS);
+  const db = dbManager.getDb();
+
+  // Candidate keys come from the query text, not from a tag vocabulary load:
+  // a few indexed probes beat caching 25k tags plus its invalidation.
+  const candidates = tagLookupCandidates(query, maxTags);
+  if (candidates.length === 0) return unchanged;
+
+  // Document frequencies for every candidate in one indexed GROUP BY: the index
+  // holds a row per (word, event), so this is a key-range scan instead of the
+  // full-table LIKE sweep the '|a|b|' column itself would force.
+  // The gate must use the SAME row set the lookup can return: a topic that is
+  // broad ledger-wide but narrow inside this project would otherwise be
+  // rejected, and a project-scoped search would lose exactly the recall it
+  // asked for. Join through memory_events so the project/scope/kind/source
+  // filters apply to the count as well.
+  const placeholders = candidates.map(() => "?").join(", ");
+  const gateFilters = filterConditions();
+  const countRows = db.prepare(`
+    SELECT t.tag AS tag, COUNT(*) AS n
+    FROM memory_event_tags t
+    JOIN memory_events e ON e.id = t.event_id
+    WHERE t.tag IN (${placeholders})${gateFilters.conditions.length ? ` AND ${gateFilters.conditions.join(" AND ")}` : ""}
+    GROUP BY t.tag
+  `).all(...candidates, ...gateFilters.params) as Array<{ tag: string; n: number }>;
+  const counts = new Map(countRows.map((row) => [row.tag, row.n]));
+
+  const seen = new Set(existing.map((event) => event.id));
+  const joined: MemoryEvent[] = [];
+  const matchedTags: string[] = [];
+
+  for (const candidate of candidates) {
+    if (joined.length >= maxExtra) break;
+    const n = counts.get(candidate) ?? 0;
+    // Document-frequency gate first: a word naming half the ledger would flood
+    // the answer with topic-adjacent noise rather than bridge to it.
+    if (n === 0 || n > maxTagEvents) continue;
+    const notIn = seen.size === 0 ? { sql: "1=1", params: [] as number[] } : {
+      sql: `e.id NOT IN (${[...seen].map(() => "?").join(", ")})`,
+      params: [...seen] as number[],
+    };
+    const { conditions, params } = filterConditions();
+    // Candidates are ordered specific-first, so the first productive one fills
+    // the budget; later, broader ones only top up what is still missing.
+    const perTag = Math.max(1, maxExtra - joined.length);
+    const rows = db.prepare(`
+      SELECT e.*
+      FROM memory_event_tags t
+      JOIN memory_events e ON e.id = t.event_id
+      WHERE t.tag = ? AND ${notIn.sql}${conditions.length ? ` AND ${conditions.join(" AND ")}` : ""}
+      ORDER BY e.hit_count DESC, e.occurred_at DESC, e.id DESC
+      LIMIT ?
+    `).all(candidate, ...notIn.params, ...params, perTag) as Record<string, unknown>[];
+    if (rows.length === 0) continue;
+    for (const row of rows) {
+      if (joined.length >= maxExtra) break;
+      const event = mapEventRow(row);
+      if (seen.has(event.id)) continue;
+      seen.add(event.id);
+      joined.push(event);
+    }
+    matchedTags.push(candidate);
+  }
+
+  if (joined.length === 0) return unchanged;
+  return { events: joined.slice(0, maxExtra), tags: matchedTags, count: Math.min(joined.length, maxExtra) };
 }
 
 /** expandPrimaryByEntityTags is the entity-tag second hop (SAG1-style join,
@@ -705,7 +931,7 @@ function expandPrimaryByEntityTags(
   const maxTagEvents = Math.max(1, options.maxTagEvents ?? DEFAULT_EXPANSION_TAG_EVENTS);
   const maxExtra = Math.max(0, options.maxExtra ?? Math.floor(limit / 2));
 
-  const noExpansion: EventSearchOutcome = { events: primary, joinedTags: [], joinedCount: 0 };
+  const noExpansion: EventSearchOutcome = { events: primary, joinedTags: [], joinedCount: 0, tagMatchedTags: [], tagMatchedCount: 0 };
   if (maxExtra === 0 || primary.length >= limit) return noExpansion;
 
   const returnedIds = new Set(primary.map((event) => event.id));
@@ -775,6 +1001,8 @@ function expandPrimaryByEntityTags(
     events: [...primary, ...joined].slice(0, limit),
     joinedTags,
     joinedCount: joined.length,
+    tagMatchedTags: [],
+    tagMatchedCount: 0,
   };
 }
 

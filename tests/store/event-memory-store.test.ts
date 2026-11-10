@@ -1360,3 +1360,168 @@ describe("event-memory-store", () => {
     );
   });
 });
+
+describe("forward tag lookup", () => {
+  let tmpDir: string;
+  let dbManager: DatabaseManager;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tag-lookup-test-"));
+    dbManager = new DatabaseManager(tmpDir);
+  });
+
+  afterEach(() => {
+    dbManager.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** Capture one event with explicit semantic tags (the model's output shape). */
+  const capture = (content: string, semanticTags: string[], options: { project?: string; captureId: string }): number => {
+    const result = captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "fact",
+      content,
+      evidenceQuote: content.slice(0, 20),
+      semanticTags,
+    }], {
+      captureId: options.captureId,
+      source: "background-review",
+      sourceSessionId: options.captureId,
+      project: options.project ?? "demo",
+    });
+    assert.equal(result.inserted, 1, `captured: ${content}`);
+    return result.eventIds[0]!;
+  };
+
+  it("finds an event by its topic tag when the query words are absent from its content", () => {
+    // Content deliberately avoids "worldmap"/"map"/"world": only the tag knows
+    // the topic, which is exactly the cold-start case the lookup exists for.
+    const carrier = capture("Tile stitching produced duplicated vertices", ["world-map"], { captureId: "cap-1" });
+    capture("Unrelated note about lint conventions", ["lint-config"], { captureId: "cap-2" });
+
+    const plain = searchMemoryEvents(dbManager, "worldmap", { limit: 10 });
+    assert.equal(plain.some((event) => event.id === carrier), false, "the lexical ladder cannot see it");
+
+    const outcome = searchMemoryEventsDetailed(dbManager, "worldmap", { limit: 10, lookupByTag: {} });
+    assert.ok(outcome.events.some((event) => event.id === carrier), "the tag lookup surfaces it");
+    assert.deepEqual(outcome.tagMatchedTags, ["worldmap"]);
+    assert.equal(outcome.tagMatchedCount, 1);
+  });
+
+  it("treats hyphenated and collapsed spellings as one concept", () => {
+    const hyphenated = capture("Tile stitching produced duplicated vertices", ["world-map"], { captureId: "cap-h" });
+    const collapsed = capture("Terrain export lost the coastal shelf", ["worldmap"], { captureId: "cap-c" });
+
+    const outcome = searchMemoryEventsDetailed(dbManager, "worldmap", { limit: 10, lookupByTag: {} });
+    const ids = outcome.events.map((event) => event.id);
+    assert.ok(ids.includes(hyphenated), "world-map answers the collapsed query");
+    assert.ok(ids.includes(collapsed), "worldmap answers the collapsed query");
+  });
+
+  it("reaches a compound tag from a single query word", () => {
+    const carrier = capture("Vertex budget tripped on the northern continent", ["world-map"], { captureId: "cap-p" });
+
+    const outcome = searchMemoryEventsDetailed(dbManager, "vertex", { limit: 10, lookupByTag: {} });
+    assert.ok(outcome.events.some((event) => event.id === carrier), "a one-word query still matches the topic");
+
+    const viaSingleWord = searchMemoryEventsDetailed(dbManager, "map", { limit: 10, lookupByTag: {} });
+    assert.ok(viaSingleWord.events.some((event) => event.id === carrier), "the tag part 'map' reaches world-map");
+  });
+
+  it("stays inside the active filters", () => {
+    const inScope = capture("Tile stitching produced duplicated vertices", ["world-map"], { captureId: "cap-a", project: "demo" });
+    const outOfScope = capture("Tile stitching duplicated vertices again", ["world-map"], { captureId: "cap-b", project: "other" });
+
+    const outcome = searchMemoryEventsDetailed(dbManager, "worldmap", { limit: 10, project: "demo", lookupByTag: {} });
+    const ids = outcome.events.map((event) => event.id);
+    assert.ok(ids.includes(inScope));
+    assert.equal(ids.includes(outOfScope), false, "tag carriers outside the project filter never enter");
+  });
+
+  it("never duplicates a row the lexical ladder already returned", () => {
+    const shared = capture("Gateway restart fixed the worldmap exporter", ["world-map"], { captureId: "cap-d" });
+
+    const outcome = searchMemoryEventsDetailed(dbManager, "worldmap", { limit: 30, lookupByTag: {} });
+    const occurrences = outcome.events.filter((event) => event.id === shared).length;
+    assert.equal(occurrences, 1, "one row, whichever path found it first");
+  });
+
+  it("does not displace lexical hits for an identifier query", () => {
+    const exact = capture("IAR-4711 fixed the exporter", ["release-gate"], { captureId: "cap-i" });
+    const carrier = capture("Duplicate vertices appeared after the merge", ["iar-4711"], { captureId: "cap-j" });
+
+    // limit 1 leaves no room: an exact-identifier query must not trade its one
+    // lexical hit for a topic match.
+    const tight = searchMemoryEventsDetailed(dbManager, "IAR-4711", { limit: 1, lookupByTag: {} });
+    assert.deepEqual(tight.events.map((event) => event.id), [exact], "the exact match keeps the only slot");
+    assert.equal(tight.tagMatchedCount, 0, "no displacement for identifier queries");
+
+    // Spare room is still usable: the tag carrier fills it instead of nothing.
+    const roomy = searchMemoryEventsDetailed(dbManager, "IAR-4711", { limit: 10, lookupByTag: {} });
+    assert.ok(roomy.events.some((event) => event.id === carrier), "empty slots are still filled");
+    assert.ok(roomy.events.findIndex((event) => event.id === exact) < roomy.events.findIndex((event) => event.id === carrier), "the lexical hit stays first");
+  });
+
+  it("marks zero-tag events processed without indexing them", () => {
+    captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "fact",
+      content: "A vague note with no topic tags",
+      evidenceQuote: "A vague note",
+      semanticTags: [],
+    }], { captureId: "cap-z", source: "background-review", sourceSessionId: "s-z", project: "demo" });
+
+    const rows = dbManager.getDb().prepare("SELECT COUNT(*) AS n FROM memory_event_tags").get() as { n: number };
+    assert.equal(rows.n, 0, "no tag means no index rows");
+  });
+
+  it("keeps the best lexical hit even when the page is smaller than the carrier budget", () => {
+    // Query words present in content: the ladder has a genuine head to protect.
+    const lexical = capture("World map export lost the coastal shelf", ["release-gate"], { captureId: "cap-l1" });
+    for (let index = 0; index < 5; index += 1) {
+      capture(`Tile stitching duplicated vertex ${index}`, ["world-map"], { captureId: `cap-l2-${index}` });
+    }
+
+    const single = searchMemoryEventsDetailed(dbManager, "world map export", { limit: 1, lookupByTag: {} });
+    assert.deepEqual(single.events.map((event) => event.id), [lexical], "limit 1 still answers with the lexical head");
+
+    const small = searchMemoryEventsDetailed(dbManager, "world map export", { limit: 3, lookupByTag: {} });
+    assert.equal(small.events[0]!.id, lexical, "the head keeps position one");
+    assert.equal(small.events.length, 3, "the page is still filled");
+    assert.ok(small.tagMatchedCount >= 1, "carriers fill the remaining slots");
+    assert.ok(small.tagMatchedCount <= small.events.length - 1, "they never take the whole page");
+
+    // Short concept words (no identifier term, so displacement applies): the
+    // reported carrier count must match what the page actually contains.
+    const shortQuery = searchMemoryEventsDetailed(dbManager, "world map", { limit: 2, lookupByTag: {} });
+    const carriersOnPage = shortQuery.events.filter((event) => event.id !== lexical).length;
+    assert.equal(shortQuery.tagMatchedCount, carriersOnPage, "the reported count equals the rows actually added");
+  });
+
+  it("skips tags that name too much of the ledger", () => {
+    // Content avoids the tag's words, so only the tag index can answer either
+    // query — the gate is the sole difference between the two runs.
+    for (let index = 0; index < 4; index += 1) {
+      capture(`Duplicate vertices appeared again on tile ${index}`, ["wide-topic"], { captureId: `cap-wide-${index}` });
+    }
+    const rare = capture("Coastal shelf lost during export", ["coastal-shelf"], { captureId: "cap-narrow" });
+
+    const gated = searchMemoryEventsDetailed(dbManager, "wide topic", {
+      limit: 10,
+      lookupByTag: { maxTagEvents: 3 },
+    });
+    assert.equal(gated.events.length, 0, "a tag naming 4 events is gated out when the cap is 3");
+
+    const admitted = searchMemoryEventsDetailed(dbManager, "wide topic", {
+      limit: 10,
+      lookupByTag: { maxTagEvents: 10 },
+    });
+    assert.equal(admitted.events.length, 4, "raising the cap admits the same tag");
+
+    const narrow = searchMemoryEventsDetailed(dbManager, "coastal shelf", {
+      limit: 10,
+      lookupByTag: { maxTagEvents: 3 },
+    });
+    assert.ok(narrow.events.some((event) => event.id === rare), "a rare tag is unaffected by the cap");
+  });
+});

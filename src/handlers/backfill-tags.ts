@@ -18,7 +18,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { DatabaseManager } from "../store/db.js";
 import type { MemoryConfig } from "../types.js";
-import { normalizeSemanticTags } from "../store/event-memory-store.js";
+import { indexEventSemanticTags, normalizeSemanticTags } from "../store/event-memory-store.js";
 import { extractPayloadWithArrayKeys, runDirectJsonCompletion } from "./review-memory-ops.js";
 
 /** Events per model call. Small enough to keep the prompt focused, large
@@ -138,7 +138,11 @@ export function registerBackfillTagsCommand(
             // not retry them; mentioned-but-empty is the same answer.
             const normalized = topics === undefined ? [] : normalizeSemanticTags(topics);
             const serialized = normalized.length > 0 ? `|${normalized.join("|")}|` : "";
-            write.run(serialized, row.id);
+            const changed = (write.run(serialized, row.id) as { changes?: number }).changes ?? 0;
+            // Guarded UPDATE: a concurrent run may have tagged this row first.
+            // Indexing anyway would attribute this run's topics to a row whose
+            // stored tags are someone else's.
+            if (changed > 0 && normalized.length > 0) indexEventSemanticTags(dbManager, row.id, normalized);
             if (normalized.length > 0) tagged++;
             else zeroTag++;
           }
@@ -148,7 +152,8 @@ export function registerBackfillTagsCommand(
           for (const row of rows) {
             const topics = parsed.get(row.id);
             const normalized = topics === undefined ? [] : normalizeSemanticTags(topics);
-            write.run(normalized.length > 0 ? `|${normalized.join("|")}|` : "", row.id);
+            const changed = (write.run(normalized.length > 0 ? `|${normalized.join("|")}|` : "", row.id) as { changes?: number }).changes ?? 0;
+            if (changed > 0 && normalized.length > 0) indexEventSemanticTags(dbManager, row.id, normalized);
             if (normalized.length > 0) tagged++;
             else zeroTag++;
           }

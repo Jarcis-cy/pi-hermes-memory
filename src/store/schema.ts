@@ -161,6 +161,21 @@ export const SCHEMA_SQL = `
   CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_events_capture_identity
     ON memory_events(IFNULL(source_session_id, capture_id), kind, scope, IFNULL(project, ''), content);
 
+  -- Forward tag lookup index: one row per (searchable word, event). A word is
+  -- either a whole tag with its hyphens removed ('world-map' -> 'worldmap', so
+  -- the two spellings the tagger emits for one concept collapse) or one hyphen
+  -- part ('world', 'map', so a single query word reaches a compound tag).
+  -- WITHOUT ROWID keeps the (tag, event_id) B-tree as the table itself: lookups
+  -- are indexed equality probes, which the LIKE scans over the '|a|b|' column
+  -- could never be (~30ms each on a 32k ledger).
+  CREATE TABLE IF NOT EXISTS memory_event_tags (
+    tag TEXT NOT NULL,
+    event_id INTEGER NOT NULL,
+    PRIMARY KEY (tag, event_id)
+  ) WITHOUT ROWID;
+
+  CREATE INDEX IF NOT EXISTS idx_memory_event_tags_event ON memory_event_tags(event_id);
+
   CREATE VIRTUAL TABLE IF NOT EXISTS event_fts USING fts5(
     content,
     evidence_quote,
@@ -176,6 +191,10 @@ export const SCHEMA_SQL = `
   CREATE TRIGGER IF NOT EXISTS memory_events_ad AFTER DELETE ON memory_events BEGIN
     INSERT INTO event_fts(event_fts, rowid, content, evidence_quote)
     VALUES ('delete', old.id, old.content, COALESCE(old.evidence_quote, ''));
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS memory_events_tags_ad AFTER DELETE ON memory_events BEGIN
+    DELETE FROM memory_event_tags WHERE event_id = old.id;
   END;
 
   CREATE TRIGGER IF NOT EXISTS memory_events_au AFTER UPDATE ON memory_events BEGIN

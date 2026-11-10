@@ -102,12 +102,20 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
       // substrings lexically. Flip this on once ingest-time semantic tags
       // exist; the plumbing and tests stay.
       const ENTITY_JOIN_ENABLED = false;
-      const { events, joinedCount, joinedTags } = searchMemoryEventsDetailed(dbManager, query, {
+      // Forward tag lookup: the query's words are matched against the semantic
+      // tag index, so an event can surface for the topic it is about even when
+      // its content shares no query word. Measured 2026-11-10 on the live
+      // ledger: concept-recall gold 1/120 -> 21/120, on-topic share 37% -> 43%,
+      // identifier-query recall unchanged (72/141), median +0.3ms on searched
+      // queries because the index is a b-tree key probe, not a table scan.
+      const TAG_LOOKUP_ENABLED = true;
+      const { events, joinedCount, joinedTags, tagMatchedCount, tagMatchedTags } = searchMemoryEventsDetailed(dbManager, query, {
         project: project === undefined ? undefined : project,
         scope: eventScope,
         ...(category ? { kind: category } : {}),
         ...(entity ? { entity } : {}),
         limit,
+        ...(entity || !TAG_LOOKUP_ENABLED ? {} : { lookupByTag: {} }),
         ...(entity || !ENTITY_JOIN_ENABLED ? {} : { expandByEntity: {} }),
       });
       const eventContents = new Set(events.map((event) => event.content));
@@ -156,6 +164,9 @@ Returns matching memory entries with their mutation target, scope, and dates. Th
         output += `\n`;
       }
 
+      if (tagMatchedCount > 0) {
+        output += `🏷️ +${tagMatchedCount} matched by topic tag (${tagMatchedTags.join(", ")}) — these events are about that topic but do not repeat the query words; check relevance before citing.\n\n`;
+      }
       if (joinedCount > 0) {
         output += `🔗 +${joinedCount} joined via shared entity tags (${joinedTags.join(", ")}) — same subject as the results above, no direct query-term match; check relevance before citing.\n\n`;
       }
