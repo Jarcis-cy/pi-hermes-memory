@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "preference": "auto",
+  "accounts": {
+    "gpt": {
+      "status": "available",
+      "updatedAt": "2026-01-01T00:00:00Z",
+      "plan": "user-confirmed subscription",
+      "note": "Example only: replace with your observed account state."
+    },
+    "glm": {
+      "status": "disabled",
+      "updatedAt": "2026-01-01T00:00:00Z",
+      "nextResetAt": null,
+      "expiresAt": null,
+      "note": "Enable only after confirming an active subscription and quota."
+    },
+    "deepseek": {
+      "status": "unknown",
+      "updatedAt": "2026-01-01T00:00:00Z",
+      "note": "Availability and balance are not inferred from a configured API key."
+    }
+  }
+}
