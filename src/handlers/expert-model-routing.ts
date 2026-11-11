@@ -62,6 +62,8 @@ function validateModel(ref: string, budget: Budget, models: readonly AvailableMo
   if (registered.some(m => modelKey(m) === ref)) return `Ambiguous model ${ref}: the full string is also a registered model ID and would swallow the thinking suffix`;
   const model = models.find(m => modelKey(m) === ref.slice(0, colon));
   if (!model) return `Model ${ref.slice(0, colon)} is not available or authenticated`;
+  const gptVersion = /^gpt-(\d+)(?:[.-]|$)/.exec(model.id);
+  if (gptVersion && Number(gptVersion[1]) < 6) return "GPT dispatch requires generation 6 or newer; use GPT-6 Luna or GPT-6.1 Terra/Sol, not a 5.x fallback";
   const pool = poolFor(model.provider);
   if (pool && !allowed(budget.accounts[pool], now)) return `${pool} pool is ${effective(budget.accounts[pool], now)}`;
   const mapped = model.thinkingLevelMap?.[level];
@@ -90,11 +92,6 @@ export function resolveExpertModel(budget: Budget, models: readonly AvailableMod
   }
   return { error: `No eligible ${category} model: ${reasons.join("; ")}` };
 }
-function defaultCategory(profile: unknown): Category {
-  if (profile === "oracle") return "critical";
-  if (profile === undefined || ["utility", "explore", "general-purpose", "plan"].includes(String(profile))) return "research";
-  return "agentic";
-}
 function summary(b: Budget, now: number): string {
   return `preference=${b.preference}; ` + pools.map(p => `${p}=${effective(b.accounts[p], now)}`).join("; ");
 }
@@ -116,7 +113,7 @@ export function setupExpertModelRouting(pi: ExtensionAPI, expertBaseDir: string)
     try {
       const b = load(), now = Date.now(), models = available(ctx), all = registered(ctx);
       const mapping = categories.map(c => { const r = resolveExpertModel(b, models, `auto:${c}`, now, all); return `${c}=${r.model ?? `BLOCK (${r.error})`}`; }).join("; ");
-      block = `${rules()}\n\n${summary(b, now)}\nAuto: ${mapping}\nClassify each new Agent call explicitly using auto:extract|research|implement|agentic|critical. Unknown quota is unconfirmed; reset does not restore availability. Use model_budget only for user-requested changes based on user or authoritative quota evidence.`;
+      block = `${rules()}\n\n${summary(b, now)}\nAuto: ${mapping}\nRouting v2: classify every new Agent call explicitly using auto:extract|research|implement|agentic|critical; missing classification is blocked regardless of role. GPT must be generation 6 or newer. Resume only the same task with description='[continue] ...'; independent mechanical tail work starts a classified utility child, with related updates batched. If auto resolution fails, report the setup fault instead of falling back to Sol. Unknown quota is unconfirmed; reset does not restore availability. Use model_budget only for user-requested changes based on user or authoritative quota evidence.`;
     } catch {
       block = "Expert model routing configuration is missing or invalid. New Agent calls are blocked until repaired.";
     }
@@ -128,10 +125,15 @@ export function setupExpertModelRouting(pi: ExtensionAPI, expertBaseDir: string)
     if (event.toolName !== "Agent" || !active()) return;
     const input = event.input as Record<string, unknown>;
     const resuming = typeof input.resume === "string" && input.resume.trim().length > 0;
-    if (resuming) return input.model !== undefined ? { block: true, reason: "model is not permitted when resuming an Agent" } : undefined;
+    if (resuming) {
+      if (input.model !== undefined) return { block: true, reason: "model is not permitted when resuming an Agent" };
+      if (typeof input.description !== "string" || !input.description.startsWith("[continue] ")) return { block: true, reason: "Resume retains the original model. Use description='[continue] ...' only for the same task's follow-up; independent extraction, issue updates or summaries need a new classified Agent (batch related tail work)." };
+      return;
+    }
     try {
       const b = load(); rules();
-      const request = input.model === undefined || input.model === "auto" ? `auto:${defaultCategory(input.subagent_type)}` : input.model;
+      const request = input.model;
+      if (request === undefined || request === "auto" || (typeof request === "string" && !request.trim())) return { block: true, reason: "Classify this task explicitly with model='auto:extract|research|implement|agentic|critical' (choose one), or supply an eligible concrete provider/model:level for an explicit override. Role-based defaults and parent-model inheritance are disabled." };
       if (typeof request !== "string") return { block: true, reason: "Invalid Agent model" };
       const result = resolveExpertModel(b, available(ctx), request, Date.now(), registered(ctx));
       if (!result.model) return { block: true, reason: result.error };
@@ -152,7 +154,7 @@ export function setupExpertModelRouting(pi: ExtensionAPI, expertBaseDir: string)
       const result = (text: string, isError = false) => ({ content: [{ type: "text" as const, text }], details: {}, ...(isError ? { isError: true } : {}) });
       if (!active()) return result("model_budget requires an active Agent tool", true);
       if (params.action === "status") {
-        try { return result(summary(load(), Date.now())); } catch { return result("Expert routing configuration missing or invalid", true); }
+        try { return result(`routing=v2; classification=required; resume=[continue]; GPT>=6; ${summary(load(), Date.now())}`); } catch { return result("Expert routing configuration missing or invalid", true); }
       }
       if (params.action !== "prefer" && params.action !== "account") return result("Invalid action", true);
       if (params.action === "prefer" && !preferences.includes(params.preference as Preference)) return result("Invalid preference", true);

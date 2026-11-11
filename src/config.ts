@@ -209,6 +209,7 @@ export function loadConfig(configPath = DEFAULT_CONFIG_PATH): MemoryConfig {
         const normalizedMemoryDir = normalizeConfiguredMemoryDir(parsed.memoryDir);
         if (normalizedMemoryDir) config.memoryDir = normalizedMemoryDir;
       }
+      if (typeof parsed.expertBaseDir === "string" && parsed.expertBaseDir.trim()) config.expertBaseDir = parsed.expertBaseDir.trim();
       if (typeof parsed.projectsMemoryDir === "string") {
         const normalizedProjectsMemoryDir = normalizeProjectsMemoryDir(parsed.projectsMemoryDir);
         if (normalizedProjectsMemoryDir) config.projectsMemoryDir = normalizedProjectsMemoryDir;

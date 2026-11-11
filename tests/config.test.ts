@@ -49,6 +49,15 @@ describe("loadConfig", () => {
     assert.strictEqual(config.quickCheckOnOpen, true);
   });
 
+  it("honors a nonempty expertBaseDir instead of silently opting routing out", () => {
+    const base = path.join(os.tmpdir(), "hermes-experts");
+    fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify({ expertBaseDir: `  ${base}  ` }));
+    assert.strictEqual(loadConfig(TEST_CONFIG_PATH).expertBaseDir, base);
+    for (const expertBaseDir of ["", " ", null, 42]) {
+      fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify({ expertBaseDir }));
+      assert.strictEqual(loadConfig(TEST_CONFIG_PATH).expertBaseDir, undefined);
+    }
+  });
   it("honors consolidationChunkChars", () => {
     fs.mkdirSync(path.dirname(TEST_CONFIG_PATH), { recursive: true });
     fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify({ consolidationChunkChars: 6000 }));
