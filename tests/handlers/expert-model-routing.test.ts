@@ -13,7 +13,7 @@ function budget() { return { version: 1 as const, preference: "auto" as const, a
 const models = [
   ["openai-codex", "gpt-6-luna"], ["openai-codex", "gpt-6.1-terra"], ["openai-codex", "gpt-6.1-sol"],
   ["zai-coding-cn", "glm-5.3-flash"], ["zai-coding-cn", "glm-5.3"], ["newapi-upstream", "deepseek-flash"],
-].map(([provider, id]) => ({ provider, id, reasoning: true, thinkingLevelMap: { max: "high" } }));
+].map(([provider, id]) => ({ provider, id, reasoning: true, thinkingLevelMap: { max: "max" } }));
 function fixture(enabled = true) {
   const root = mkdtempSync(join(tmpdir(), "expert-routing-")), dir = join(root, "_shared"), file = join(dir, "model-budget.json");
   mkdirSync(dir); if (enabled) writeFileSync(file, JSON.stringify(budget()));
@@ -26,6 +26,35 @@ function fixture(enabled = true) {
 }
 async function call(f: ReturnType<typeof fixture>, input: Record<string, unknown>, name = "Agent") { return f.hooks.tool_call({ toolName: name, input }, f.ctx); }
 async function action(f: ReturnType<typeof fixture>, params: object) { return f.tool.execute("id", params); }
+
+test("Luna extract uses max and rejects weaker explicit levels without clamping", () => {
+  const b = budget(); b.preference = "gpt";
+  assert.equal(resolveExpertModel(b, models, "auto:extract", now).model, "openai-codex/gpt-6-luna:max");
+  for (const level of ["off", "minimal", "low", "medium", "high", "xhigh"]) {
+    assert.match(resolveExpertModel(b, models, `openai-codex/gpt-6-luna:${level}`, now).error!, /Luna.*max/i);
+  }
+  assert.equal(resolveExpertModel(b, models, "openai-codex/gpt-6-luna:max", now).model, "openai-codex/gpt-6-luna:max");
+  const noMax = models.map(m => m.id === "gpt-6-luna" ? { ...m, thinkingLevelMap: {} } : m);
+  b.accounts.glm.status = "disabled"; b.accounts.deepseek.status = "disabled";
+  assert.match(resolveExpertModel(b, noMax, "openai-codex/gpt-6-luna:max", now).error!, /does not support thinking level max/);
+  assert.match(resolveExpertModel(b, noMax, "auto:extract", now).error!, /does not support thinking level max/);
+});
+
+test("expert extract keeps task classification and injection describes progressive first pass", async () => {
+  const f = fixture(); try {
+    const b = budget(); b.preference = "gpt"; writeFileSync(f.file, JSON.stringify(b));
+    const input: Record<string, unknown> = { subagent_type: "backend-rnd", model: "auto:extract" };
+    assert.equal(await call(f, input), undefined);
+    assert.equal(input.model, "openai-codex/gpt-6-luna:max");
+    const event = { systemPrompt: "base", systemPromptOptions: { sections: {} as Record<string, string> } };
+    await f.hooks.before_agent_start(event, f.ctx);
+    assert.match(event.systemPromptOptions.sections.expert_model_routing, /progressive first pass/i);
+    assert.match(event.systemPromptOptions.sections.expert_model_routing, /reuse existing materials.*concise conclusions.*identify gaps/i);
+    assert.match(event.systemPromptOptions.sections.expert_model_routing, /Luna max reasoning does not expand report depth/i);
+    assert.match(event.systemPromptOptions.sections.expert_model_routing, /Routing v3/);
+    assert.match((await action(f, { action: "status" })).content[0].text, /routing=v3.*Luna=max/);
+  } finally { f.cleanup(); }
+});
 
 test("no config: no hooks or tool registered", () => { const f = fixture(false); try { assert.deepEqual(f.hooks, {}); assert.equal(f.tool, undefined); } finally { f.cleanup(); } });
 test("prompt sections, default and explicit classification; parent and unrelated tools unchanged", async () => {
@@ -61,7 +90,7 @@ test("levels are never clamped, unknown model and ambiguous native ID blocked", 
   assert.match(resolveExpertModel(b, models, "openai-codex/gpt-6-luna", now).error!, /complete/);
   assert.match(resolveExpertModel(b, models, "openai-codex/gpt-6-luna:max", now).model!, /:max/);
   const restricted = models.map(m => ({ ...m, thinkingLevelMap: { high: null } }));
-  assert.match(resolveExpertModel(b, restricted, "openai-codex/gpt-6-luna:high", now).error!, /does not support/);
+  assert.match(resolveExpertModel(b, restricted, "openai-codex/gpt-6.1-terra:high", now).error!, /does not support/);
   assert.match(resolveExpertModel(b, restricted, "openai-codex/gpt-6-luna:max", now).error!, /does not support/);
   const collision = [...models, { provider: "openai-codex", id: "gpt-6-luna:medium", reasoning: true, thinkingLevelMap: { max: "high" } }];
   assert.match(resolveExpertModel(b, models, "openai-codex/gpt-6-luna:medium", now, collision).error!, /Ambiguous/);
@@ -107,7 +136,7 @@ test("new work requires classification regardless of profile; retired GPT models
       assert.match(resolveExpertModel(budget(), retired, `openai-codex/gpt-5.6-${name}:medium`, now).error!, /GPT.*6/i);
     }
     const b = budget(); b.preference = "gpt";
-    for (const [category, model] of [["extract", "gpt-6-luna:medium"], ["research", "gpt-6.1-terra:medium"], ["implement", "gpt-6.1-terra:high"], ["agentic", "gpt-6.1-sol:medium"], ["critical", "gpt-6.1-sol:high"]]) {
+    for (const [category, model] of [["extract", "gpt-6-luna:max"], ["research", "gpt-6.1-terra:medium"], ["implement", "gpt-6.1-terra:high"], ["agentic", "gpt-6.1-sol:medium"], ["critical", "gpt-6.1-sol:high"]]) {
       assert.equal(resolveExpertModel(b, models, `auto:${category}`, now).model, `openai-codex/${model}`);
     }
     b.accounts.glm.status = "exhausted"; b.accounts.deepseek.status = "disabled";

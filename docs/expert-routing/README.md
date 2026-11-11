@@ -18,13 +18,17 @@ The parent decides the nature/risk of each slice; no separate classifier model i
 
 | Agent `model` | GPT starting point | Work |
 | --- | --- | --- |
-| `auto:extract` | GPT-6 Luna Medium | Mechanical extraction/search/organization |
-| `auto:research` | GPT-6.1 Terra Medium | Bounded general research and fact checks |
+| `auto:extract` | GPT-6 Luna Max | Mechanical extraction and simple comparisons / preliminary conclusions from existing materials |
+| `auto:research` | GPT-6.1 Terra Medium | General research requiring additional material and fact checks |
 | `auto:implement` | GPT-6.1 Terra High | Clear implementation/refactoring/tests |
 | `auto:agentic` | GPT-6.1 Sol Medium | Cross-file autonomous tool/compile/debug work |
 | `auto:critical` | GPT-6.1 Sol High | Difficult reasoning/security/architecture/acceptance |
 
 A `tool_call` hook resolves this to an exact authenticated `provider/model:level` before the real `Agent` executes. It does not change the parent's model or effort. Missing/bare-auto/empty model requests are blocked for every role: the caller must classify the actual work, never guess from the expert identity. GPT requests below generation 6 (including explicit 5.6 requests) are rejected; current defaults are Luna 6 and Terra/Sol 6.1. Unavailable current models are a blocker, not permission to use an old-generation fallback.
+
+Use a progressive first pass matched to the user's original question and requested depth: reuse existing material, provide a concise comparison or conclusion and identify gaps. Do not add full historical forensics, lifecycle accounting, or renewed root-cause review, or use self-expanded scope to justify critical. Deepen on request and upgrade only for a concrete difficulty, not mechanically on every follow-up. Maintain actual safety, authorization, and destructive-operation thresholds. Luna Max is maximum reasoning effort, not a reason to expand report depth.
+
+Explicit Luna 6 requests below max are rejected with a max instruction, not rewritten. If max is unsupported, capability validation reports it unavailable; never fall back to a lower Luna effort.
 
 The first three classes may prefer an eligible GLM subscription, then GPT, then the company DeepSeek upstream; `preference` changes that ordering. A constrained GPT pool steers basic work toward eligible alternatives. Automatic agentic/critical dispatch keeps the GPT quality floor rather than silently substituting a weaker model. Explicit full model requests are preserved when eligible and supported; unsupported effort is rejected instead of silently clamped.
 
@@ -46,4 +50,4 @@ Statuses are `available`, `constrained`, `exhausted`, `disabled`, or `unknown`. 
 
 Run the focused `tests/handlers/expert-model-routing.test.ts` lane and `npm run check`. Use fake clocks/states for reset/expiry boundaries and stub model catalogs to test exact IDs/efforts without spending live quota. Verify the real host profile loader recognizes `utility`, and verify a fresh extension runtime resolves a stub Agent call before execution. Test natural-language preference changes through the parent-facing state tool rather than fragile keyword matching.
 
-Check the complete configuration path, not just `setupExpertModelRouting(pi, testRoot)`: `loadConfig()` must preserve `expertBaseDir`, otherwise `src/index.ts` searches the default `~/.pi/agent/experts/_shared` and silently opts out when that budget file is absent. After installation, inspect a real parent for the injected `Routing v2` block and `model_budget` registration/status (`routing=v2`), then check actual auto-dispatched child models. A stub resolver test alone does not prove activation. Reload only an idle parent with no active children; do not restart a shared web server or claim busy sessions were hot-updated.
+Check the complete configuration path, not just `setupExpertModelRouting(pi, testRoot)`: `loadConfig()` must preserve `expertBaseDir`, otherwise `src/index.ts` searches the default `~/.pi/agent/experts/_shared` and silently opts out when that budget file is absent. After installation, inspect a real parent for the injected `Routing v3` block and `model_budget` registration/status (`routing=v3; Luna=max`), then check actual auto-dispatched child models. A stub resolver test alone does not prove activation. Reload only an idle parent with no active children; do not restart a shared web server or claim busy sessions were hot-updated.

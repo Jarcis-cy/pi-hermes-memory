@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Expert routing v3**: GPT Luna 6 extract uses max reasoning, and explicit lower Luna efforts are rejected rather than rewritten. Simple comparisons and preliminary conclusions over existing materials belong to extract; guidance emphasizes progressive delivery without expanding scope or weakening safety boundaries. Status reports `routing=v3; Luna=max`.
+
 - **STATE.md curation is append-delta, never a page rewrite**: rewriting a page every time it fills silently drops boundary conditions — how the same pit gets stepped in twice. Entries move out by being demoted to a single pointer line, every retained conclusion must carry an evidence pointer (`refs/<file>`, `E<event id>`, commit sha, ticket), and the move is logged.
 
 - **Concretion conflicts are triaged instead of queued**: of 18 pending rows on the live ledger, 14 were the model mislabelling its own action — a `merge` citing one principle, a `refine` citing none, a `conflict` with nothing to contradict. Those are repaired now (`merge` -> `refine` -> `add`, validated against the principles that actually exist), and a project-scoped candidate whose evidence cannot name one project is promoted to `global` rather than parked for a scoping decision the queue never let the user make. A genuine reversal is settled without asking only when exactly one principle is contradicted, the candidate carries at least two source events, its newest evidence is strictly newer than everything the target cites, and the target is unpinned. Repairs and auto-settlements are reported in the concretion summary.

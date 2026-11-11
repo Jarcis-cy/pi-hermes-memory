@@ -17,7 +17,7 @@ const preferences: Preference[] = ["glm", "gpt", "deepseek", "auto"];
 const categories: Category[] = ["extract", "research", "implement", "agentic", "critical"];
 const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const candidates: Record<Pool, Partial<Record<Category, string>>> = {
-  gpt: { extract: "openai-codex/gpt-6-luna:medium", research: "openai-codex/gpt-6.1-terra:medium", implement: "openai-codex/gpt-6.1-terra:high", agentic: "openai-codex/gpt-6.1-sol:medium", critical: "openai-codex/gpt-6.1-sol:high" },
+  gpt: { extract: "openai-codex/gpt-6-luna:max", research: "openai-codex/gpt-6.1-terra:medium", implement: "openai-codex/gpt-6.1-terra:high", agentic: "openai-codex/gpt-6.1-sol:medium", critical: "openai-codex/gpt-6.1-sol:high" },
   glm: { extract: "zai-coding-cn/glm-5.3-flash:high", research: "zai-coding-cn/glm-5.3-flash:high", implement: "zai-coding-cn/glm-5.3:max" },
   deepseek: { extract: "newapi-upstream/deepseek-flash:high", research: "newapi-upstream/deepseek-flash:high", implement: "newapi-upstream/deepseek-flash:max" },
 };
@@ -66,6 +66,7 @@ function validateModel(ref: string, budget: Budget, models: readonly AvailableMo
   if (gptVersion && Number(gptVersion[1]) < 6) return "GPT dispatch requires generation 6 or newer; use GPT-6 Luna or GPT-6.1 Terra/Sol, not a 5.x fallback";
   const pool = poolFor(model.provider);
   if (pool && !allowed(budget.accounts[pool], now)) return `${pool} pool is ${effective(budget.accounts[pool], now)}`;
+  if (model.provider === "openai-codex" && model.id === "gpt-6-luna" && level !== "max") return "GPT-6 Luna requires thinking level max; use openai-codex/gpt-6-luna:max";
   const mapped = model.thinkingLevelMap?.[level];
   if ((!model.reasoning && level !== "off") || mapped === null || ((level === "xhigh" || level === "max") && mapped === undefined)) return `Model ${modelKey(model)} does not support thinking level ${level}`;
   return undefined;
@@ -113,7 +114,7 @@ export function setupExpertModelRouting(pi: ExtensionAPI, expertBaseDir: string)
     try {
       const b = load(), now = Date.now(), models = available(ctx), all = registered(ctx);
       const mapping = categories.map(c => { const r = resolveExpertModel(b, models, `auto:${c}`, now, all); return `${c}=${r.model ?? `BLOCK (${r.error})`}`; }).join("; ");
-      block = `${rules()}\n\n${summary(b, now)}\nAuto: ${mapping}\nRouting v2: classify every new Agent call explicitly using auto:extract|research|implement|agentic|critical; missing classification is blocked regardless of role. GPT must be generation 6 or newer. Resume only the same task with description='[continue] ...'; independent mechanical tail work starts a classified utility child, with related updates batched. If auto resolution fails, report the setup fault instead of falling back to Sol. Unknown quota is unconfirmed; reset does not restore availability. Use model_budget only for user-requested changes based on user or authoritative quota evidence.`;
+      block = `${rules()}\n\n${summary(b, now)}\nAuto: ${mapping}\nRouting v3: Progressive first pass: reuse existing materials for simple comparisons and concise conclusions, identify gaps, and expand depth only when the user requests it; upgrade the model only for a concrete necessary difficulty within the frozen scope; do not inflate scope or downgrade safety boundaries. Luna max reasoning does not expand report depth. Classify every new Agent call explicitly using auto:extract|research|implement|agentic|critical; missing classification is blocked regardless of role. GPT must be generation 6 or newer. Resume only the same task with description='[continue] ...'; independent mechanical tail work starts a classified utility child, with related updates batched. If auto resolution fails, report the setup fault instead of falling back to Sol. Unknown quota is unconfirmed; reset does not restore availability. Use model_budget only for user-requested changes based on user or authoritative quota evidence.`;
     } catch {
       block = "Expert model routing configuration is missing or invalid. New Agent calls are blocked until repaired.";
     }
@@ -154,7 +155,7 @@ export function setupExpertModelRouting(pi: ExtensionAPI, expertBaseDir: string)
       const result = (text: string, isError = false) => ({ content: [{ type: "text" as const, text }], details: {}, ...(isError ? { isError: true } : {}) });
       if (!active()) return result("model_budget requires an active Agent tool", true);
       if (params.action === "status") {
-        try { return result(`routing=v2; classification=required; resume=[continue]; GPT>=6; ${summary(load(), Date.now())}`); } catch { return result("Expert routing configuration missing or invalid", true); }
+        try { return result(`routing=v3; Luna=max; classification=required; resume=[continue]; GPT>=6; ${summary(load(), Date.now())}`); } catch { return result("Expert routing configuration missing or invalid", true); }
       }
       if (params.action !== "prefer" && params.action !== "account") return result("Invalid action", true);
       if (params.action === "prefer" && !preferences.includes(params.preference as Preference)) return result("Invalid preference", true);
