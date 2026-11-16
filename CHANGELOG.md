@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Expert routing v3**: GPT Luna 6 extract uses max reasoning, and explicit lower Luna efforts are rejected rather than rewritten. Simple comparisons and preliminary conclusions over existing materials belong to extract; guidance emphasizes progressive delivery without expanding scope or weakening safety boundaries. Status reports `routing=v3; Luna=max`.
+- **Expert routing v3**: GPT Luna 6 extract uses max reasoning, and explicit lower Luna efforts are rejected rather than rewritten. GLM-5.3-Flash is the mechanical/simple base tier (free per the user): auto extract uses `glm-5.3-flash:max`, explicit non-max Flash requests are rejected under any provider exposing that canonical ID, an unsupported max is reported rather than downgraded to high, and the GLM research default moves from Flash to `glm-5.3:max` so complex work never lands on Flash just because it is free. Simple comparisons and preliminary conclusions over existing materials belong to extract; guidance emphasizes progressive delivery without expanding scope or weakening safety boundaries. Status reports `routing=v3; Luna=max; Flash=max`.
 
 - **STATE.md curation is append-delta, never a page rewrite**: rewriting a page every time it fills silently drops boundary conditions — how the same pit gets stepped in twice. Entries move out by being demoted to a single pointer line, every retained conclusion must carry an evidence pointer (`refs/<file>`, `E<event id>`, commit sha, ticket), and the move is logged.
 
