@@ -12,6 +12,7 @@ const now = Date.parse("2026-02-01T00:00:00Z");
 function budget() { return { version: 1 as const, preference: "auto" as const, accounts: Object.fromEntries(["gpt", "glm", "deepseek"].map(p => [p, { status: "available", updatedAt: date, plan: "keep" }])) } as any; }
 const models = [
   ["openai-codex", "gpt-6-luna"], ["openai-codex", "gpt-6.1-terra"], ["openai-codex", "gpt-6.1-sol"],
+  ["zai-coding-cn", "glm-5.4"],
   ["zai-coding-cn", "glm-5.3-flash"], ["zai-coding-cn", "glm-5.3"], ["newapi-upstream", "deepseek-flash"],
 ].map(([provider, id]) => ({ provider, id, reasoning: true, thinkingLevelMap: { max: "max" } }));
 function fixture(enabled = true) {
@@ -40,11 +41,44 @@ test("Luna extract uses max and rejects weaker explicit levels without clamping"
   assert.match(resolveExpertModel(b, noMax, "auto:extract", now).error!, /does not support thinking level max/);
 });
 
-test("GLM-5.3-Flash is max-only; research defaults to glm-5.3, never Flash", () => {
+test("GLM-5.4 is first for all categories under glm and auto; unavailable pools fall back", () => {
   const b = budget();
-  assert.equal(resolveExpertModel(b, models, "auto:extract", now).model, "zai-coding-cn/glm-5.3-flash:max");
-  assert.equal(resolveExpertModel(b, models, "auto:research", now).model, "zai-coding-cn/glm-5.3:max");
-  assert.equal(resolveExpertModel(b, models, "auto:implement", now).model, "zai-coding-cn/glm-5.3:max");
+  for (const preference of ["glm", "auto"]) {
+    b.preference = preference;
+    for (const category of ["extract", "research", "implement", "agentic", "critical"]) {
+      const request = `auto:${category}`;
+      assert.equal(resolveExpertModel(b, models, request, now).model, "zai-coding-cn/glm-5.4:max");
+      for (const status of ["exhausted", "disabled"]) {
+        b.accounts.glm.status = status;
+        assert.match(resolveExpertModel(b, models, request, now).model!, /^openai-codex\//);
+      }
+      b.accounts.glm.status = "available"; b.accounts.glm.expiresAt = date;
+      assert.match(resolveExpertModel(b, models, request, now).model!, /^openai-codex\//);
+      b.accounts.glm.expiresAt = null;
+    }
+  }
+  b.accounts.glm.status = "exhausted"; b.accounts.gpt.status = "disabled";
+  assert.equal(resolveExpertModel(b, models, "auto:implement", now).model, "newapi-upstream/deepseek-flash:max");
+  assert.match(resolveExpertModel(b, models, "auto:critical", now).error!, /No eligible/);
+});
+
+test("GLM-5.4 is max-only and never downgrades when max is missing", () => {
+  const b = budget();
+  for (const level of ["off", "minimal", "low", "medium", "high", "xhigh"]) {
+    assert.match(resolveExpertModel(b, models, `zai-coding-cn/glm-5.4:${level}`, now).error!, /GLM-5\.4.*max/);
+  }
+  for (const max of [null, undefined]) {
+    const noMax = models.map(m => m.id === "glm-5.4" ? { ...m, thinkingLevelMap: { low: "low", high: "high", max } } : m);
+    assert.match(resolveExpertModel(b, noMax, "zai-coding-cn/glm-5.4:max", now).error!, /does not support thinking level max/);
+    assert.equal(resolveExpertModel(b, noMax, "auto:extract", now).model, "openai-codex/gpt-6-luna:max");
+    b.accounts.gpt.status = "disabled"; b.accounts.deepseek.status = "disabled";
+    assert.match(resolveExpertModel(b, noMax, "auto:critical", now).error!, /does not support thinking level max/);
+    b.accounts.gpt.status = "available"; b.accounts.deepseek.status = "available";
+  }
+});
+
+test("GLM-5.3-Flash remains max-only for explicit requests", () => {
+  const b = budget();
   for (const level of ["off", "minimal", "low", "medium", "high", "xhigh"]) {
     assert.match(resolveExpertModel(b, models, `zai-coding-cn/glm-5.3-flash:${level}`, now).error!, /GLM-5\.3-Flash.*max/);
   }
@@ -54,9 +88,6 @@ test("GLM-5.3-Flash is max-only; research defaults to glm-5.3, never Flash", () 
   assert.equal(resolveExpertModel(b, aliased, "neibu/glm-5.3-flash:max", now).model, "neibu/glm-5.3-flash:max");
   const noFlashMax = models.map(m => m.id === "glm-5.3-flash" ? { ...m, thinkingLevelMap: { low: "low", high: "high" } } : m);
   assert.match(resolveExpertModel(b, noFlashMax, "zai-coding-cn/glm-5.3-flash:max", now).error!, /does not support thinking level max/);
-  assert.equal(resolveExpertModel(b, noFlashMax, "auto:extract", now).model, "openai-codex/gpt-6-luna:max");
-  b.accounts.gpt.status = "disabled"; b.accounts.deepseek.status = "disabled";
-  assert.match(resolveExpertModel(b, noFlashMax, "auto:extract", now).error!, /No eligible extract model: .*does not support thinking level max/);
 });
 
 test("expert extract keeps task classification and injection describes progressive first pass", async () => {
@@ -83,9 +114,9 @@ test("prompt sections, default and explicit classification; parent and unrelated
     await f.hooks.before_agent_start(event, f.ctx);
     assert.match(event.systemPromptOptions.sections.expert_model_routing, /Long-term rules/);
     assert.match(event.systemPromptOptions.sections.expert_model_routing, /research=zai-coding-cn/);
-    const input: Record<string, unknown> = { model: "auto:research" }; assert.equal(await call(f, input), undefined); assert.equal(input.model, "zai-coding-cn/glm-5.3:max");
-    const expert: Record<string, unknown> = { subagent_type: "backend-rnd", model: "auto:agentic" }; await call(f, expert); assert.equal(expert.model, "openai-codex/gpt-6.1-sol:medium");
-    const oracle: Record<string, unknown> = { subagent_type: "oracle", model: "auto:critical" }; await call(f, oracle); assert.equal(oracle.model, "openai-codex/gpt-6.1-sol:high");
+    const input: Record<string, unknown> = { model: "auto:research" }; assert.equal(await call(f, input), undefined); assert.equal(input.model, "zai-coding-cn/glm-5.4:max");
+    const expert: Record<string, unknown> = { subagent_type: "backend-rnd", model: "auto:agentic" }; await call(f, expert); assert.equal(expert.model, "zai-coding-cn/glm-5.4:max");
+    const oracle: Record<string, unknown> = { subagent_type: "oracle", model: "auto:critical" }; await call(f, oracle); assert.equal(oracle.model, "zai-coding-cn/glm-5.4:max");
     const other: Record<string, unknown> = {}; await call(f, other, "bash"); assert.deepEqual(other, {}); assert.equal(f.ctx.model.id, "parent");
     const old = await f.hooks.before_agent_start({ systemPrompt: "base" }, f.ctx); assert.match(old.systemPrompt, /^base\n\nLong-term rules/);
     f.setActive([]); const noAgent = { systemPrompt: "base", systemPromptOptions: { sections: {} } }; assert.equal(await f.hooks.before_agent_start(noAgent, f.ctx), undefined); assert.deepEqual(noAgent.systemPromptOptions.sections, {});
@@ -101,7 +132,7 @@ test("pool states, expiry, reset recheck and preference", () => {
   b.accounts.glm.expiresAt = null; b.preference = "deepseek"; assert.match(resolve().model!, /^newapi/);
   b.preference = "gpt"; assert.match(resolve().model!, /^openai/);
   b.accounts.gpt.status = "constrained"; assert.match(resolve().model!, /^zai/); assert.match(resolve("auto:critical").model!, /gpt-6.1-sol:high/);
-  b.accounts.gpt.status = "exhausted"; assert.match(resolve("auto:critical").error!, /No eligible/);
+  b.accounts.gpt.status = "exhausted"; assert.equal(resolve("auto:critical").model, "zai-coding-cn/glm-5.4:max");
 });
 test("levels are never clamped, unknown model and ambiguous native ID blocked", () => {
   const b = budget();
@@ -119,7 +150,7 @@ test("resume never rewritten; invalid and removed configuration fail closed", as
   const f = fixture(); try {
     const resume = { resume: "session", description: "[continue] same investigation" }; assert.equal(await call(f, resume), undefined); assert.deepEqual(resume, { resume: "session", description: "[continue] same investigation" });
     assert.equal((await call(f, { resume: "session", model: "auto:research" })).block, true);
-    const blank: Record<string, unknown> = { resume: " ", model: "auto:research" }; await call(f, blank); assert.equal(blank.model, "zai-coding-cn/glm-5.3:max", "blank resume is a new call, as in the host runtime");
+    const blank: Record<string, unknown> = { resume: " ", model: "auto:research" }; await call(f, blank); assert.equal(blank.model, "zai-coding-cn/glm-5.4:max", "blank resume is a new call, as in the host runtime");
     for (const bad of ["{", JSON.stringify({ ...budget(), version: 2 }), JSON.stringify({ ...budget(), accounts: { ...budget().accounts, glm: { status: "bogus", updatedAt: date } } })]) {
       writeFileSync(f.file, bad); assert.equal((await call(f, {})).block, true);
     }
@@ -150,7 +181,7 @@ test("new work requires classification regardless of profile; retired GPT models
       }
     }
     const expert: Record<string, unknown> = { subagent_type: "backend-rnd", model: "auto:extract" };
-    await call(f, expert); assert.equal(expert.model, "zai-coding-cn/glm-5.3-flash:max");
+    await call(f, expert); assert.equal(expert.model, "zai-coding-cn/glm-5.4:max");
     const retired = [...models, ...["luna", "terra", "sol"].map(name => ({ ...models[0], id: `gpt-5.6-${name}` }))];
     for (const name of ["luna", "terra", "sol"]) {
       assert.match(resolveExpertModel(budget(), retired, `openai-codex/gpt-5.6-${name}:medium`, now).error!, /GPT.*6/i);
@@ -170,7 +201,7 @@ test("resume requires conscious same-task declaration; independent tail work sta
     assert.equal(await call(f, { resume: "existing", description: "[continue] fix the same failing regression" }), undefined);
     assert.equal((await call(f, { resume: "existing", description: "[continue] same fix", model: "auto:implement" })).block, true);
     const independent: Record<string, unknown> = { subagent_type: "utility", model: "auto:extract", description: "batch issue readbacks" };
-    await call(f, independent); assert.equal(independent.model, "zai-coding-cn/glm-5.3-flash:max");
+    await call(f, independent); assert.equal(independent.model, "zai-coding-cn/glm-5.4:max");
   } finally { f.cleanup(); }
 });
 
@@ -184,6 +215,6 @@ test("config file to expert paths to hook follows the configured root, not the h
     assert.ok(names.includes("model_budget"));
     const input = { model: "auto:research" };
     assert.equal(await hooks.tool_call({ toolName: "Agent", input }, f.ctx), undefined);
-    assert.equal(input.model, "zai-coding-cn/glm-5.3:max");
+    assert.equal(input.model, "zai-coding-cn/glm-5.4:max");
   } finally { f.cleanup(); }
 });
