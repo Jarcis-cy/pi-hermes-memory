@@ -20,7 +20,7 @@ const providerPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const candidates: Record<Pool, Partial<Record<Category, string>>> = {
   gpt: { extract: "openai-codex/gpt-6-luna:max", research: "openai-codex/gpt-6.1-terra:medium", implement: "openai-codex/gpt-6.1-terra:high", agentic: "openai-codex/gpt-6.1-sol:medium", critical: "openai-codex/gpt-6.1-sol:high" },
   glm: { extract: "zai-coding-cn/glm-5.4:max", research: "zai-coding-cn/glm-5.4:max", implement: "zai-coding-cn/glm-5.4:max", agentic: "zai-coding-cn/glm-5.4:max", critical: "zai-coding-cn/glm-5.4:max" },
-  deepseek: { extract: "newapi-upstream/deepseek-flash:high", research: "newapi-upstream/deepseek-flash:high", implement: "newapi-upstream/deepseek-flash:max" },
+  deepseek: { extract: "newapi-upstream/deepseek-flash:high", research: "newapi-upstream/deepseek-flash:high", implement: "newapi-upstream/deepseek-flash:max", agentic: "newapi-upstream/deepseek-flash:max", critical: "newapi-upstream/deepseek-flash:max" },
 };
 
 function validDate(value: unknown): value is string {

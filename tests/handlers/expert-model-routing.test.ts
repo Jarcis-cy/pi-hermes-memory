@@ -59,7 +59,43 @@ test("GLM-5.4 is first for all categories under glm and auto; unavailable pools 
   }
   b.accounts.glm.status = "exhausted"; b.accounts.gpt.status = "disabled";
   assert.equal(resolveExpertModel(b, models, "auto:implement", now).model, "newapi-upstream/deepseek-flash:max");
+  assert.equal(resolveExpertModel(b, models, "auto:critical", now).model, "newapi-upstream/deepseek-flash:max");
+  b.accounts.deepseek.status = "disabled";
   assert.match(resolveExpertModel(b, models, "auto:critical", now).error!, /No eligible/);
+});
+
+test("deepseek preference resolves all five categories from the deepseek upstream and never falls through to GLM", () => {
+  const b = budget();
+  b.preference = "deepseek";
+  const expected: Record<string, string> = {
+    extract: "newapi-upstream/deepseek-flash:high",
+    research: "newapi-upstream/deepseek-flash:high",
+    implement: "newapi-upstream/deepseek-flash:max",
+    agentic: "newapi-upstream/deepseek-flash:max",
+    critical: "newapi-upstream/deepseek-flash:max",
+  };
+  for (const [category, model] of Object.entries(expected)) {
+    assert.equal(resolveExpertModel(b, models, `auto:${category}`, now).model, model, `${category} must stay on the deepseek upstream instead of skipping to GLM`);
+  }
+  // GLM-5.4 is overloaded (429), so a disabled, exhausted or constrained glm pool must not change the result.
+  for (const status of ["disabled", "exhausted", "constrained"]) {
+    b.accounts.glm.status = status;
+    for (const [category, model] of Object.entries(expected)) {
+      assert.equal(resolveExpertModel(b, models, `auto:${category}`, now).model, model, `${category} must ignore glm=${status}`);
+    }
+  }
+  b.accounts.glm.status = "available";
+  // When the deepseek pool itself is down the documented order still applies: deepseek -> glm -> gpt.
+  b.accounts.deepseek.status = "exhausted";
+  assert.equal(resolveExpertModel(b, models, "auto:critical", now).model, "zai-coding-cn/glm-5.4:max");
+});
+
+test("glm preference still maps all five categories to GLM-5.4 max", () => {
+  const b = budget();
+  b.preference = "glm";
+  for (const category of ["extract", "research", "implement", "agentic", "critical"]) {
+    assert.equal(resolveExpertModel(b, models, `auto:${category}`, now).model, "zai-coding-cn/glm-5.4:max", `${category} must stay on GLM under glm preference`);
+  }
 });
 
 test("GLM-5.4 is max-only and never downgrades when max is missing", () => {
