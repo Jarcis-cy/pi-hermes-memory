@@ -9,13 +9,14 @@ type Status = "available" | "constrained" | "exhausted" | "disabled" | "unknown"
 type Preference = Pool | "auto";
 type Category = "extract" | "research" | "implement" | "agentic" | "critical";
 type Account = { status: Status; updatedAt: string; note?: string; nextResetAt?: string | null; expiresAt?: string | null; plan?: string };
-type Budget = { version: 1; preference: Preference; accounts: Record<Pool, Account> };
+type Budget = { version: 1; preference: Preference; accounts: Record<Pool, Account>; providers?: Record<string, Account> };
 type AvailableModel = { provider: string; id: string; reasoning: boolean; thinkingLevelMap?: Record<string, unknown> };
 const pools: Pool[] = ["gpt", "glm", "deepseek"];
 const statuses: Status[] = ["available", "constrained", "exhausted", "disabled", "unknown"];
 const preferences: Preference[] = ["glm", "gpt", "deepseek", "auto"];
 const categories: Category[] = ["extract", "research", "implement", "agentic", "critical"];
 const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const providerPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const candidates: Record<Pool, Partial<Record<Category, string>>> = {
   gpt: { extract: "openai-codex/gpt-6-luna:max", research: "openai-codex/gpt-6.1-terra:medium", implement: "openai-codex/gpt-6.1-terra:high", agentic: "openai-codex/gpt-6.1-sol:medium", critical: "openai-codex/gpt-6.1-sol:high" },
   glm: { extract: "zai-coding-cn/glm-5.4:max", research: "zai-coding-cn/glm-5.4:max", implement: "zai-coding-cn/glm-5.4:max", agentic: "zai-coding-cn/glm-5.4:max", critical: "zai-coding-cn/glm-5.4:max" },
@@ -31,14 +32,23 @@ function validDate(value: unknown): value is string {
   return +mo >= 1 && +mo <= 12 && +d >= 1 && +d <= days && +h <= 23 && +min <= 59 && +s <= 59 &&
     (tz === "Z" || (+tz.slice(1, 3) <= 23 && +tz.slice(4, 6) <= 59));
 }
+function parseAccount(label: string, a: unknown): void {
+  const account = a as Account;
+  if (!account || typeof account !== "object" || !statuses.includes(account.status) || !validDate(account.updatedAt)) throw new Error(`invalid ${label} account`);
+  for (const key of ["expiresAt", "nextResetAt"] as const) if (account[key] != null && !validDate(account[key])) throw new Error(`invalid ${label}.${key}`);
+  for (const key of ["note", "plan"] as const) if (account[key] !== undefined && typeof account[key] !== "string") throw new Error(`invalid ${label}.${key}`);
+}
 function parseBudget(text: string): Budget {
   const b = JSON.parse(text) as Budget;
   if (!b || typeof b !== "object" || b.version !== 1 || !preferences.includes(b.preference) || !b.accounts || typeof b.accounts !== "object") throw new Error("invalid budget version, preference or accounts");
-  for (const pool of pools) {
-    const a = b.accounts[pool];
-    if (!a || typeof a !== "object" || !statuses.includes(a.status) || !validDate(a.updatedAt)) throw new Error(`invalid ${pool} account`);
-    for (const key of ["expiresAt", "nextResetAt"] as const) if (a[key] != null && !validDate(a[key])) throw new Error(`invalid ${pool}.${key}`);
-    for (const key of ["note", "plan"] as const) if (a[key] !== undefined && typeof a[key] !== "string") throw new Error(`invalid ${pool}.${key}`);
+  for (const pool of pools) parseAccount(pool, b.accounts[pool]);
+  const providers = (b as { providers?: unknown }).providers;
+  if (providers !== undefined) {
+    if (!providers || typeof providers !== "object" || Array.isArray(providers)) throw new Error("invalid providers: expected an object keyed by provider name");
+    for (const [provider, account] of Object.entries(providers as Record<string, unknown>)) {
+      if (!provider.trim() || !providerPattern.test(provider)) throw new Error(`invalid providers entry: unusable provider name ${JSON.stringify(provider)}`);
+      parseAccount(`provider ${provider}`, account);
+    }
   }
   return b;
 }
@@ -66,6 +76,8 @@ function validateModel(ref: string, budget: Budget, models: readonly AvailableMo
   if (gptVersion && Number(gptVersion[1]) < 6) return "GPT dispatch requires generation 6 or newer; use GPT-6 Luna or GPT-6.1 Terra/Sol, not a 5.x fallback";
   const pool = poolFor(model.provider);
   if (pool && !allowed(budget.accounts[pool], now)) return `${pool} pool is ${effective(budget.accounts[pool], now)}`;
+  const provider = budget.providers?.[model.provider];
+  if (provider && !allowed(provider, now)) return `provider ${model.provider} is ${effective(provider, now)}`;
   if (model.provider === "openai-codex" && model.id === "gpt-6-luna" && level !== "max") return "GPT-6 Luna requires thinking level max; use openai-codex/gpt-6-luna:max";
   if (model.id === "glm-5.3-flash" && level !== "max") return `GLM-5.3-Flash is the mechanical/simple tier and requires thinking level max (use ${modelKey(model)}:max); use glm-5.3 for research or complex judgement`;
   if (model.id === "glm-5.4" && level !== "max") return `GLM-5.4 requires thinking level max; use ${modelKey(model)}:max`;
@@ -95,7 +107,8 @@ export function resolveExpertModel(budget: Budget, models: readonly AvailableMod
   return { error: `No eligible ${category} model: ${reasons.join("; ")}` };
 }
 function summary(b: Budget, now: number): string {
-  return `preference=${b.preference}; ` + pools.map(p => `${p}=${effective(b.accounts[p], now)}`).join("; ");
+  const providers = Object.entries(b.providers ?? {}).map(([provider, a]) => `${provider}=${effective(a, now)}`);
+  return `preference=${b.preference}; ` + pools.map(p => `${p}=${effective(b.accounts[p], now)}`).join("; ") + (providers.length ? `; providers: ${providers.join("; ")}` : "");
 }
 
 /** Install opt-in routing for new Agent calls using only the supplied expert directory. */
@@ -145,10 +158,11 @@ export function setupExpertModelRouting(pi: ExtensionAPI, expertBaseDir: string)
   const nullableDate = Type.Optional(Type.Union([Type.String(), Type.Null()]));
   pi.registerTool({
     name: "model_budget", label: "Model budget",
-    description: "Inspect budget or update preference/account only at the user's request, based on the user or authoritative quota evidence. account requires a short source note.",
+    description: "Inspect budget or update preference/account only at the user's request, based on the user or authoritative quota evidence. account targets exactly one pool or one provider, and requires a short source note.",
     parameters: Type.Object({
       action: Type.String({ enum: ["status", "prefer", "account"] }),
       preference: Type.Optional(Type.String({ enum: preferences })), pool: Type.Optional(Type.String({ enum: pools })),
+      provider: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
       status: Type.Optional(Type.String({ enum: statuses })), note: Type.Optional(Type.String()),
       nextResetAt: nullableDate, expiresAt: nullableDate, plan: Type.Optional(Type.String()),
     }),
@@ -160,7 +174,13 @@ export function setupExpertModelRouting(pi: ExtensionAPI, expertBaseDir: string)
       }
       if (params.action !== "prefer" && params.action !== "account") return result("Invalid action", true);
       if (params.action === "prefer" && !preferences.includes(params.preference as Preference)) return result("Invalid preference", true);
-      if (params.action === "account" && (!pools.includes(params.pool as Pool) || !statuses.includes(params.status as Status) || typeof params.note !== "string" || !params.note.trim() || params.note.length > 300)) return result("account requires pool, status, and a short source note", true);
+      const hasPool = params.pool !== undefined, hasProvider = params.provider !== undefined;
+      if (params.action === "account") {
+        if (hasPool === hasProvider) return result("account requires exactly one of pool or provider, plus status and a short source note", true);
+        if (hasPool && !pools.includes(params.pool as Pool)) return result("Invalid pool", true);
+        if (hasProvider && !providerPattern.test(params.provider as string)) return result("provider must be one provider name from the model catalog (letters, digits, . _ : -), without spaces", true);
+        if (!statuses.includes(params.status as Status) || typeof params.note !== "string" || !params.note.trim() || params.note.length > 300) return result("account requires exactly one of pool or provider, plus status and a short source note", true);
+      }
       for (const v of [params.nextResetAt, params.expiresAt]) if (v !== undefined && v !== null && !validDate(v)) return result("Dates require a valid timestamp with timezone", true);
       const lock = `${file}.lock`, temp = `${file}.${randomUUID()}.tmp`;
       let fd: number;
@@ -170,8 +190,11 @@ export function setupExpertModelRouting(pi: ExtensionAPI, expertBaseDir: string)
         const b = load();
         if (params.action === "prefer") b.preference = params.preference as Preference;
         else {
-          const a = b.accounts[params.pool as Pool];
-          a.status = params.status as Status; a.note = params.note!.trim(); a.updatedAt = new Date().toISOString();
+          const stamp = new Date().toISOString();
+          const a = params.provider !== undefined
+            ? ((b.providers ??= {})[params.provider] ??= { status: "available", updatedAt: stamp })
+            : b.accounts[params.pool as Pool];
+          a.status = params.status as Status; a.note = params.note!.trim(); a.updatedAt = stamp;
           if (params.nextResetAt !== undefined) a.nextResetAt = params.nextResetAt;
           if (params.expiresAt !== undefined) a.expiresAt = params.expiresAt;
           if (params.plan !== undefined) a.plan = params.plan;

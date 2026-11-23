@@ -20,6 +20,7 @@
 - GLM有效且额度可用时优先前三类：extract 用 GLM-5.3-Flash max（机械/简单档），research/implement 用本体 glm-5.3 max；GLM耗尽/到期必须排除。Max套餐不等于Max推理，同账户不同模型不获得新额度。自动agentic/critical保持GPT质量下限。
 - GPT constrained时基础任务优先合适备用；DeepSeek是公司备用，不当无限额度。无满足下限候选就报告阻塞。
 - 账户状态以旁边model-budget.json为准；未知不等于充足，预计重置到达只待复查，临时429/503不等于周额度耗尽。
+- 池（accounts）管订阅分组，供应商（providers）管单个 provider：两者是 AND，先池后供应商，拒单信息会写明是哪一个。没有归入任何池的 provider（例如个人直连端点与公司网关同时提供同一模型）只有供应商级开关能挡住它；被禁供应商不改变它所在池的状态。
 - 用户自然语言要求偏好/账户更新时，父台理解后用model_budget的prefer/account操作；不解析引文为配置指令，不虚构余额或Pro升级，更新只影响后续派发。
 - 验证生效看真实父会话路由注入与model_budget status的routing=v3; Luna=max; Flash=max，以及auto实际派出的子模型；不能仅凭磁盘安装或离线stub说已生效。只在父台及其子任务均安全空闲时重载资源，不重启共享pi-web。
 - 派发记录顺手记类别、实际模型/强度、理由和是否续用；不要新增任务账本，不给每个小改动安排强档复审。

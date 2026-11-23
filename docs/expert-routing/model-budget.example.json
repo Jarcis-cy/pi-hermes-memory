@@ -20,5 +20,12 @@
       "updatedAt": "2026-01-01T00:00:00Z",
       "note": "Availability and balance are not inferred from a configured API key."
     }
+  },
+  "providers": {
+    "example-direct-provider": {
+      "status": "disabled",
+      "updatedAt": "2026-01-01T00:00:00Z",
+      "note": "Example only: optional provider-level gate, evaluated after the pool gate. Delete the key to leave all providers selectable."
+    }
   }
 }

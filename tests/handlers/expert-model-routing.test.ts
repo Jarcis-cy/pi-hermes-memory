@@ -13,7 +13,7 @@ function budget() { return { version: 1 as const, preference: "auto" as const, a
 const models = [
   ["openai-codex", "gpt-6-luna"], ["openai-codex", "gpt-6.1-terra"], ["openai-codex", "gpt-6.1-sol"],
   ["zai-coding-cn", "glm-5.4"],
-  ["zai-coding-cn", "glm-5.3-flash"], ["zai-coding-cn", "glm-5.3"], ["newapi-upstream", "deepseek-flash"],
+  ["zai-coding-cn", "glm-5.3-flash"], ["zai-coding-cn", "glm-5.3"], ["newapi-upstream", "deepseek-flash"], ["deepseek", "deepseek-chat"],
 ].map(([provider, id]) => ({ provider, id, reasoning: true, thinkingLevelMap: { max: "max" } }));
 function fixture(enabled = true) {
   const root = mkdtempSync(join(tmpdir(), "expert-routing-")), dir = join(root, "_shared"), file = join(dir, "model-budget.json");
@@ -88,6 +88,66 @@ test("GLM-5.3-Flash remains max-only for explicit requests", () => {
   assert.equal(resolveExpertModel(b, aliased, "neibu/glm-5.3-flash:max", now).model, "neibu/glm-5.3-flash:max");
   const noFlashMax = models.map(m => m.id === "glm-5.3-flash" ? { ...m, thinkingLevelMap: { low: "low", high: "high" } } : m);
   assert.match(resolveExpertModel(b, noFlashMax, "zai-coding-cn/glm-5.3-flash:max", now).error!, /does not support thinking level max/);
+});
+
+test("provider-level disable blocks direct deepseek while the authorized upstream stays eligible", () => {
+  const b = budget();
+  b.providers = { deepseek: { status: "disabled", updatedAt: date, note: "personal prepaid account; owner-only decision" } };
+  assert.match(resolveExpertModel(b, models, "deepseek/deepseek-chat:max", now).error!, /provider deepseek is disabled/);
+  assert.equal(resolveExpertModel(b, models, "newapi-upstream/deepseek-flash:high", now).model, "newapi-upstream/deepseek-flash:high");
+  b.accounts.deepseek.status = "disabled";
+  assert.match(resolveExpertModel(b, models, "newapi-upstream/deepseek-flash:high", now).error!, /deepseek pool is disabled/);
+  b.providers["openai-codex"] = { status: "disabled", updatedAt: date };
+  b.accounts.gpt.status = "disabled";
+  assert.match(resolveExpertModel(b, models, "openai-codex/gpt-6.1-sol:high", now).error!, /gpt pool is disabled/, "for a pool-mapped provider the pool verdict is reported before the provider verdict");
+  b.accounts.gpt.status = "available";
+  assert.match(resolveExpertModel(b, models, "openai-codex/gpt-6.1-sol:high", now).error!, /provider openai-codex is disabled/);
+});
+
+test("a budget without providers keeps every provider selectable", async () => {
+  const b = budget();
+  assert.equal(b.providers, undefined);
+  assert.equal(resolveExpertModel(b, models, "deepseek/deepseek-chat:max", now).model, "deepseek/deepseek-chat:max");
+  assert.equal(resolveExpertModel(b, models, "newapi-upstream/deepseek-flash:high", now).model, "newapi-upstream/deepseek-flash:high");
+  const f = fixture(); try {
+    const legacy: Record<string, unknown> = { model: "deepseek/deepseek-chat:max" };
+    assert.equal(await call(f, legacy), undefined);
+    assert.equal(legacy.model, "deepseek/deepseek-chat:max");
+  } finally { f.cleanup(); }
+});
+
+test("invalid providers configuration is rejected instead of silently ignored", async () => {
+  const f = fixture(); try {
+    const b = budget();
+    const bads: unknown[] = [
+      "deepseek",
+      [],
+      { "": { status: "disabled", updatedAt: date } },
+      { deepseek: { status: "bogus", updatedAt: date } },
+      { deepseek: { status: "disabled" } },
+      { deepseek: { status: "disabled", updatedAt: "not-a-date" } },
+      { deepseek: { status: "disabled", updatedAt: date, note: 5 } },
+      { deepseek: { status: "disabled", updatedAt: date, nextResetAt: "2026-13-01T00:00:00Z" } },
+    ];
+    for (const providers of bads) {
+      writeFileSync(f.file, JSON.stringify({ ...b, providers }));
+      assert.equal((await call(f, {})).block, true, `must reject providers=${JSON.stringify(providers)}`);
+    }
+    writeFileSync(f.file, JSON.stringify({ ...b, providers: { deepseek: { status: "disabled", updatedAt: date, note: "owner-only" } } }));
+    assert.equal(await call(f, { model: "auto:research" }), undefined, "a valid providers map must load");
+    assert.match((await call(f, { model: "deepseek/deepseek-chat:max" })).reason, /provider deepseek is disabled/);
+  } finally { f.cleanup(); }
+});
+
+test("auto dispatch never selects a provider disabled at provider level", () => {
+  const b = budget();
+  b.providers = { "zai-coding-cn": { status: "disabled", updatedAt: date, note: "provider suspended" } };
+  assert.equal(resolveExpertModel(b, models, "auto:research", now).model, "openai-codex/gpt-6.1-terra:medium");
+  assert.equal(resolveExpertModel(b, models, "auto:extract", now).model, "openai-codex/gpt-6-luna:max");
+  assert.match(resolveExpertModel(b, models, "zai-coding-cn/glm-5.4:max", now).error!, /provider zai-coding-cn is disabled/);
+  b.accounts.gpt.status = "disabled"; b.accounts.deepseek.status = "disabled";
+  assert.match(resolveExpertModel(b, models, "auto:extract", now).error!, /provider zai-coding-cn is disabled/);
+  assert.match(resolveExpertModel(b, models, "auto:extract", now).error!, /No eligible/);
 });
 
 test("expert extract keeps task classification and injection describes progressive first pass", async () => {
@@ -168,6 +228,33 @@ test("budget actions preserve fields, enforce lock and parent authorization", as
     writeFileSync(`${f.file}.lock`, "foreign"); assert.match((await action(f, { action: "prefer", preference: "gpt" })).content[0].text, /busy/); assert.equal(readFileSync(`${f.file}.lock`, "utf8"), "foreign");
     f.setActive([]); assert.equal((await action(f, { action: "account", pool: "gpt", status: "disabled", note: "user" })).isError, true);
     assert.equal(JSON.parse(readFileSync(f.file, "utf8")).accounts.gpt.status, "available");
+  } finally { f.cleanup(); }
+});
+
+test("account action writes and reads back a provider-level disable without touching the pool", async () => {
+  const f = fixture(); try {
+    const saved = await action(f, { action: "account", provider: "deepseek", status: "disabled", note: "user: personal prepaid account, owner-only decision" });
+    assert.equal(saved.isError, undefined);
+    assert.match(saved.content[0].text, /providers: deepseek=disabled/);
+    const b = JSON.parse(readFileSync(f.file, "utf8"));
+    assert.equal(b.providers.deepseek.status, "disabled");
+    assert.equal(b.accounts.deepseek.status, "available", "pool state stays independent");
+    assert.equal(b.accounts.deepseek.plan, "keep");
+    assert.match((await action(f, { action: "status" })).content[0].text, /providers: deepseek=disabled/);
+    assert.match((await call(f, { model: "deepseek/deepseek-chat:max" })).reason, /provider deepseek is disabled/);
+    const upstream: Record<string, unknown> = { model: "newapi-upstream/deepseek-flash:high" };
+    assert.equal(await call(f, upstream), undefined);
+    assert.equal(upstream.model, "newapi-upstream/deepseek-flash:high");
+    for (const bad of [
+      { action: "account", status: "disabled", note: "x" },
+      { action: "account", pool: "glm", provider: "deepseek", status: "disabled", note: "x" },
+      { action: "account", provider: "deep seek", status: "disabled", note: "x" },
+      { action: "account", provider: "deepseek", status: "bogus", note: "x" },
+      { action: "account", provider: "deepseek", status: "disabled" },
+    ]) assert.equal((await action(f, bad)).isError, true, `must reject ${JSON.stringify(bad)}`);
+    assert.equal(JSON.parse(readFileSync(f.file, "utf8")).providers.deepseek.status, "disabled", "rejected writes change nothing");
+    assert.match((await action(f, { action: "account", provider: "deepseek", status: "available", note: "owner re-enabled" })).content[0].text, /providers: deepseek=available/);
+    assert.equal(await call(f, { model: "deepseek/deepseek-chat:max" }), undefined);
   } finally { f.cleanup(); }
 });
 
