@@ -92,10 +92,11 @@ describe("store budget sizing", () => {
     }], { charLimit });
   };
 
-  it("defaults to a store budget sized for months of full-load distillation (200k, not 48k)", () => {
+  it("defaults to a store budget that only guards against unbounded growth (400k)", () => {
     // Two days of real full-load work produced ~60k chars of distinct principles
-    // and re-deadlocked the layer at 48k. The default must clear that comfortably.
-    assert.equal(DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT, 200000);
+    // and re-deadlocked the layer at 48k; a later live store passed 200k after
+    // curation and re-deadlocked it again. The cap is a safety rail, not a target.
+    assert.equal(DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT, 400000);
   });
 
   it("admits a store far beyond the old 48k cap while still bounding growth at 200k", () => {

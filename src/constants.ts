@@ -52,11 +52,15 @@ export const PRINCIPLE_INDEX_MAX_CHARS = 8000;
  * Sizing note: two days of full-load distillation produced ~60k characters of
  * genuinely distinct principles, so a 48k cap filled in 48 hours and re-created
  * the deadlock one level up. The cap exists only to stop unbounded growth, not
- * to force curation; attention is governed by the injection budget. 200k is
- * ~57k tokens of cold storage — far below the model's context — and at the
- * observed rate buys roughly a year of headroom.
+ * to force curation; attention is governed by the injection budget.
+ *
+ * Raised 200k -> 400k: a live store still ran past 200k after curation, and at
+ * that point every new addition was refused as "over capacity" again — the same
+ * deadlock one level lower, this time one cap away from real usage. The number
+ * is a safety rail against infinite growth, not a target to curate down to;
+ * 400k is ~110k tokens of cold storage, still far below the model's context.
  */
-export const DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT = 200000;
+export const DEFAULT_PRINCIPLE_STORE_CHAR_LIMIT = 400000;
 /** Summary width in the index. Wide enough to recognise a rule, narrow enough to
  * keep one line per principle. */
 export const PRINCIPLE_INDEX_SUMMARY_CHARS = 64;

@@ -1499,6 +1499,43 @@ function findNearDuplicatePrinciple(
   return best;
 }
 
+/**
+ * Highest-scoring active principle in ANOTHER scope that restates `content`.
+ *
+ * The same lesson routinely ends up stored once per scope — a global copy and a
+ * project copy of one rule — and the same-scope gate above is structurally blind
+ * to it: in each scope the row is new. Both copies then compete for the same
+ * injected prompt while saying one thing. Only legitimate reinforce targets are
+ * considered: a project principle may only absorb evidence from its own project,
+ * so another project's rule is never a target.
+ */
+function findCrossScopeRestatement(
+  db: ReturnType<DatabaseManager["getDb"]>,
+  input: { scope: EventScope; project: string | null; content: string },
+  threshold: number = PRINCIPLE_POSSIBLE_RESTATEMENT_THRESHOLD,
+): { id: number; similarity: number } | null {
+  const rows = db.prepare(`
+    SELECT id, scope, project, content FROM principles
+    WHERE status = 'active'
+      AND NOT (scope = ? AND IFNULL(project, '') = IFNULL(?, ''))
+  `).all(input.scope, input.project) as Array<{
+    id: number;
+    scope: EventScope;
+    project: string | null;
+    content: string;
+  }>;
+  const candidateProject = cleanNullable(input.project);
+  let best: { id: number; similarity: number } | null = null;
+  for (const row of rows) {
+    if (row.scope === "project" && cleanNullable(row.project) !== candidateProject) continue;
+    const score = tokenSetSimilarity(row.content, input.content);
+    if (score >= threshold && (!best || score > best.similarity)) {
+      best = { id: row.id, similarity: score };
+    }
+  }
+  return best;
+}
+
 function addPrincipleInTransaction(
   db: ReturnType<DatabaseManager["getDb"]>,
   input: {
@@ -1563,6 +1600,21 @@ function addPrincipleInTransaction(
     );
     if (possibleRestatement) {
       return { restatementOf: possibleRestatement.id, restatementSimilarity: possibleRestatement.similarity };
+    }
+  }
+
+  // Cross-scope twin: the same-scope gates above cannot see that this exact lesson
+  // already lives in another scope (a global rule restated per project is the
+  // normal failure mode). That is not a new occasion either — absorb it into the
+  // copy that already exists, exactly the way a same-scope near-duplicate is
+  // absorbed, so the store holds one row per rule instead of one per scope.
+  // Only pure adds: a refine/merge is BY DESIGN close to the principles it
+  // replaces, and `distinct` must still be able to keep a nuance separate.
+  if (!options.skipRestatementCheck && supersedesIds.length === 0) {
+    const crossScopeTwin = findCrossScopeRestatement(db, { scope: input.scope, project, content });
+    if (crossScopeTwin) {
+      linkPrincipleSources(db, crossScopeTwin.id, input.sourceEventIds);
+      return { duplicateId: crossScopeTwin.id };
     }
   }
 

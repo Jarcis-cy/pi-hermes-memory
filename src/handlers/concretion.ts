@@ -43,6 +43,13 @@ A good adaptive principle:
 
 Do not promote one-off status, paths, IDs, benchmark numbers, completed outcomes, or isolated wording corrections unless they support a broader lesson. Do not infer more than the events support.
 
+What may become a principle:
+- A principle is a rule of behavior for how to work. Product or project knowledge — what a feature is or how it is implemented, a design decision or owner ruling, a fix recipe for a specific defect, an implementation constraint of one module — must NOT become a principle; classify those events as none (they stay in episodic memory and remain searchable).
+- Never add a principle that restates a rule the agent already receives in its instructions (standing instructions, AGENTS.md, skills).
+- Before adding, compare the candidate with active principles in every scope; if the lesson already exists in another scope, reinforce that one instead of adding a twin.
+- Use refine only when the existing wording is now wrong or misleading. If it is merely improvable or could absorb another nuance, reinforce instead. Do not rewrite for style, language, or added detail.
+- State one rule with its conditions in one or two sentences (about 250 characters at most): no incident narration, no ids, paths, or numbers.
+
 Compare every candidate with the active principles:
 - add: genuinely new and compatible principle;
 - reinforce: same principle, new supporting evidence; do not rewrite it;
@@ -93,6 +100,9 @@ export interface ConcretionDeps {
   runDirectJsonCompletion?: typeof runDirectJsonCompletion;
   runConcretion?: typeof runConcretion;
   execChildPrompt?: typeof execChildPrompt;
+  /** Rules the host injects into every session (STANDING.md). Supplied as a
+   * getter because the store loads after this wiring is created. */
+  standingInstructions?: () => string[];
 }
 
 export interface ConcretionResult {
@@ -174,6 +184,10 @@ export function buildConcretionUserPrompt(
   principles: ReturnType<typeof getAllActivePrinciples>,
   usageSignals: ReturnType<typeof getPrincipleUsageSignals> | null = null,
   budgetUsage: { used: number; limit: number } | null = null,
+  /** Rules the host already injects into every session (STANDING.md). Listed so
+   * the model can refuse to mint a principle that restates one of them; omitted
+   * entirely when there are none. */
+  standingInstructions: string[] | null = null,
 ): string {
   const eventLines = events.map((event) => JSON.stringify({
     id: event.id,
@@ -214,6 +228,10 @@ export function buildConcretionUserPrompt(
     }
   }
   const mergeLines = suggestMergePairs(principles);
+  const standingLines = (standingInstructions ?? [])
+    .map((instruction) => instruction.trim())
+    .filter(Boolean)
+    .map((instruction, index) => `${index + 1}. ${instruction}`);
   return [
     "--- Pending Events (JSONL) ---",
     ...eventLines,
@@ -231,6 +249,13 @@ export function buildConcretionUserPrompt(
       ]
       : []),
     ...(budgetLines.length ? ["", "--- Principle Budget ---", ...budgetLines] : []),
+    ...(standingLines.length
+      ? [
+        "",
+        "--- Standing instructions (already always injected; never restate these as principles) ---",
+        ...standingLines,
+      ]
+      : []),
     ...(signalLines.length
       ? [
         "",
@@ -298,6 +323,18 @@ function emptyResult(overrides: Partial<ConcretionResult> = {}): ConcretionResul
   return { ok: true, eventCount: 0, added: 0, reinforced: 0, refined: 0, merged: 0, conflicts: 0, ignored: 0, skipped: 0, unclassified: 0, ...overrides };
 }
 
+/** Standing rules for the prompt, or null when none are wired in. A provider that
+ * throws must not fail a run: the section only makes classification stricter. */
+function readStandingInstructions(deps: ConcretionDeps): string[] | null {
+  if (!deps.standingInstructions) return null;
+  try {
+    const entries = deps.standingInstructions();
+    return Array.isArray(entries) && entries.length > 0 ? entries : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function runConcretion(
   pi: Pick<ExtensionAPI, "exec">,
   ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
@@ -341,6 +378,7 @@ export async function runConcretion(
         used: completePrinciples.reduce((sum, principle) => sum + principle.content.length, 0),
         limit: storeCharLimit,
       },
+      readStandingInstructions(deps),
     );
     const runDirect = deps.runDirectJsonCompletion ?? runDirectJsonCompletion;
     const runChild = deps.execChildPrompt ?? execChildPrompt;
@@ -498,7 +536,7 @@ export async function drainConcretionQueue(
   let failure: string | undefined;
   while (runs < CONCRETION_CATCHUP_MAX_RUNS && shouldRunAutomaticConcretion(dbManager, config)) {
     if (options.isCancelled?.()) break;
-    const result = await run(pi, ctx, dbManager, globalDir, config, "automatic");
+    const result = await run(pi, ctx, dbManager, globalDir, config, "automatic", deps);
     runs++;
     if (!result.ok) {
       const message = result.error ?? "no reason reported";

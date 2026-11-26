@@ -1066,6 +1066,52 @@ describe("event-memory-store", () => {
     assert.equal(added?.content, "Project alpha should use pnpm everywhere.");
     assert.equal(added?.scope, "project");
   });
+  it("reinforces a principle from another scope instead of adding a twin", () => {
+    const first = captureMemoryEvents(dbManager, [{ scope: "global", kind: "failure", content: "Cancelled parent left children alive." }], {
+      captureId: "cross-scope-1", source: "manual",
+    });
+    const run1 = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run1, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "Verify child work has stopped after cancelling a parent task.",
+      rationale: "Parent/child divergence.",
+      sourceEventIds: first.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+    const [original] = getActivePrinciples(dbManager);
+    assert.equal(original?.scope, "global");
+
+    // 同一教训在项目范围再说一遍：同一范围里它是"新"的，所以同范围那两道门看不见它
+    const second = captureMemoryEvents(dbManager, [{
+      scope: "project",
+      kind: "failure",
+      content: "Cancelled parent left children alive in project alpha.",
+    }], { captureId: "cross-scope-2", source: "manual", project: "alpha" });
+    const run2 = startConcretionRun(dbManager, "manual", 1);
+    const applied = applyConcretionPlan(dbManager, run2, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "project",
+      content: "Verify child work has stopped after cancelling the parent task.",
+      rationale: "Same rule, restated per project.",
+      sourceEventIds: second.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 20000 });
+
+    assert.equal(applied.added, 0, "the same rule must not get a second row in another scope");
+    assert.equal(applied.conflicts, 0, "a cross-scope restatement is absorbed, not parked for a human");
+    assert.equal(applied.reinforced, 1, "it reinforces the copy that already exists");
+
+    const active = getActivePrinciples(dbManager);
+    assert.equal(active.length, 1, "no new principle row is created");
+    assert.equal(active[0]!.scope, "global");
+    assert.deepEqual(
+      [...active[0]!.sourceEventIds].sort((a, b) => a - b),
+      [...first.eventIds, ...second.eventIds].sort((a, b) => a - b),
+      "the existing principle keeps both pieces of evidence",
+    );
+  });
+
   it("lets the user keep a possible restatement separate instead of a dead end", () => {
     const first = captureMemoryEvents(dbManager, [{ scope: "global", kind: "failure", content: "Adapter wiring failed." }], {
       captureId: "distinct-1", source: "manual",

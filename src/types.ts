@@ -148,9 +148,11 @@ export interface MemoryConfig {
    * omitted from the prompt but listed in the discoverability index and remain
    * recallable, so this is an attention budget, not a storage cap. */
   principleCharLimit?: number;
-  /** Maximum characters the principle layer may HOLD. Default: 200000. Keeping
-   * this above `principleCharLimit` is what stops a curated layer from deadlocking:
-   * a store larger than the injection budget is normal once omission exists. */
+  /** Maximum characters the principle layer may HOLD. Default: 400000 — a safety
+   * rail against unbounded growth, not a curation target (a live store passed the
+   * old 200k after curation and re-deadlocked the layer). Keeping this above
+   * `principleCharLimit` is what stops a curated layer from deadlocking: a store
+   * larger than the injection budget is normal once omission exists. */
   principleStoreCharLimit?: number;
   /** Base directory for /expert scaffolds. Default: <agentRoot>/experts */
   expertBaseDir?: string;

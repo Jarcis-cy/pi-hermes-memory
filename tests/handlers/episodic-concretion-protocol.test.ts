@@ -5,7 +5,7 @@ import {
   parseEventExtractionResponse,
   parsePrincipleFeedbackIds,
 } from "../../src/handlers/event-extraction.js";
-import { buildConcretionUserPrompt, parseConcretionResponse } from "../../src/handlers/concretion.js";
+import { buildConcretionUserPrompt, CONCRETION_SYSTEM_PROMPT, parseConcretionResponse } from "../../src/handlers/concretion.js";
 
 describe("event extraction protocol", () => {
   it("parses concrete events with required evidence", () => {
@@ -319,5 +319,39 @@ describe("principle feedback id forms", () => {
     const feedback = parsePrincipleFeedbackIds(text, new Set([304, 221, 306]));
     assert.deepEqual(feedback.applied, [304, 221, 306]);
     assert.deepEqual(feedback.violated, [221]);
+  });
+});
+
+describe("concretion scope rules", () => {
+  it("tells the model that product knowledge is not a principle", () => {
+    const prompt = CONCRETION_SYSTEM_PROMPT;
+    assert.match(prompt, /A principle is a rule of behavior for how to work\./);
+    assert.match(prompt, /must NOT become a principle; classify those events as none/);
+    assert.match(prompt, /Never add a principle that restates a rule the agent already receives/);
+    assert.match(prompt, /if the lesson already exists in another scope, reinforce that one instead of adding a twin/);
+    assert.match(prompt, /Use refine only when the existing wording is now wrong or misleading\./);
+    assert.match(prompt, /about 250 characters at most/);
+  });
+
+  it("lists standing instructions after the budget section so they are never restated", () => {
+    const prompt = buildConcretionUserPrompt(
+      [],
+      [],
+      null,
+      { used: 100, limit: 20000 },
+      ["Never deploy on Fridays.", "Ask before rewriting git history."],
+    );
+    assert.match(prompt, /--- Standing instructions \(already always injected; never restate these as principles\) ---/);
+    assert.match(prompt, /1\. Never deploy on Fridays\./);
+    assert.match(prompt, /2\. Ask before rewriting git history\./);
+    assert.ok(
+      prompt.indexOf("--- Principle Budget ---") < prompt.indexOf("--- Standing instructions"),
+      "the standing list must follow the budget section",
+    );
+  });
+
+  it("omits the standing section when nothing is pinned", () => {
+    assert.doesNotMatch(buildConcretionUserPrompt([], [], null, { used: 100, limit: 20000 }), /Standing instructions/);
+    assert.doesNotMatch(buildConcretionUserPrompt([], [], null, null, []), /Standing instructions/);
   });
 });

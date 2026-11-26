@@ -376,6 +376,9 @@ export default function (pi: ExtensionAPI) {
     projectName: projectNameRef,
     ensureMemoryReady,
     globalDir,
+    // Distillation must see the rules that are already always injected, or it
+    // mints principles restating them (10% of the live store was such echoes).
+    standingInstructions: () => standingStore?.list() ?? [],
   });
 
   // ── 6. Setup session-end flush ──
@@ -426,7 +429,9 @@ export default function (pi: ExtensionAPI) {
   // ── 9. Register commands ──
   registerInsightsCommand(memoryPi, store, projectStoreRef, projectNameRef, dbManager);
   registerBackfillTagsCommand(memoryPi, dbManager, config);
-  registerConcretionCommand(memoryPi, dbManager, globalDir, config);
+  registerConcretionCommand(memoryPi, dbManager, globalDir, config, {
+    standingInstructions: () => standingStore?.list() ?? [],
+  });
   registerMemoryConflictsCommand(
     memoryPi,
     dbManager,

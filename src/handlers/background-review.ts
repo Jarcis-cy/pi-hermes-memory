@@ -49,6 +49,9 @@ export interface BackgroundReviewOptions {
   dbManager?: DatabaseManager | null;
   projectName?: ProjectNameRef;
   globalDir?: string;
+  /** Standing rules already injected every session (STANDING.md), so the
+   * distillation prompt can refuse to restate one as a new principle. */
+  standingInstructions?: () => string[];
   deps?: BackgroundReviewDeps;
 }
 
@@ -343,6 +346,10 @@ export function setupBackgroundReview(
               // failed distillation run must leave a visible trace.
               console.warn(`[pi-hermes-memory] Memory concretion failed: ${error}`);
             },
+          }, {
+            // Standing rules are already in every prompt; the concretion prompt
+            // gets them so distillation cannot mint a twin of one.
+            standingInstructions: options.standingInstructions,
           });
           const { aggregate } = drained;
           if (aggregate.added > 0 || aggregate.refined > 0 || aggregate.reinforced > 0 || aggregate.conflicts > 0) {
