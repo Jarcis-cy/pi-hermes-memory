@@ -21,11 +21,17 @@ import { captureMemoryEvents } from "../store/event-memory-store.js";
 /** Expert names double as directory names and Matrix @-handles: keep them
  * flat, lowercase, and free of path syntax so no scaffold can escape base. */
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
-/** STATE.md soft cap in lines; the charter tells the expert to self-distill
- * when approaching it (decisions→DECISIONS.md, evidence→refs/, cross-project
- * lessons→CRAFT.md, maybes→one pointer line) — nothing is dropped without a
- * trace, so no user decision is required. */
-export const STATE_SOFT_CAP_LINES = 80;
+/** STATE.md soft cap in CHARACTERS, not lines; the charter tells the expert to
+ * self-distill when it is exceeded (decisions→DECISIONS.md, evidence→refs/,
+ * cross-project lessons→CRAFT.md, maybes→one pointer line) — nothing is dropped
+ * without a trace, so no user decision is required.
+ *
+ * A line count is the wrong unit and was bypassed in practice: experts that
+ * "kept under 80 lines" wrote 1,000–2,600 characters per line and reached
+ * 100k characters (11 experts, 357k total), while the gauge reported them at
+ * ~100% of a cap they had in fact blown by a factor of ten. Characters are what
+ * the reader (and the model's context) actually pays for. */
+export const STATE_SOFT_CAP_CHARS = 10000;
 
 export interface ExpertPaths {
   expertBaseDir: string;
@@ -59,11 +65,12 @@ function charter(name: string, description: string): string {
     // Curation is append-delta, never a full rewrite: rewriting a page every time it
     // fills silently drops boundary conditions, which is how the same pit gets
     // stepped in twice. Moving an entry out means demoting it to a pointer line.
-    `3. 本项目 \`STATE.md\` 接近 ${STATE_SOFT_CAP_LINES} 行时自行收页，不问用户，但**只许增量改，禁整页重写**（重写会逐轮腐蚀边界条件）：`,
+    `3. 本项目 \`STATE.md\` 超过 ${STATE_SOFT_CAP_CHARS} 字符时自行收页，不问用户，但**只许增量改，禁整页重写**（重写会逐轮腐蚀边界条件）：`,
     "   移出＝在原处降级成一行指针，绝不无痕删除：决策结论入 `DECISIONS.md`（一段一条，带日期与来源）、",
     "   细节依据入 `refs/`、跨项目经验入 `CRAFT.md`、仍有效的旧现状并入「当前基线」、拿不准去留的压成一行进「指针区」；",
     "   留在 `STATE.md` 的每条结论都要带证据指针（`refs/<文件>` / `E<事件号>` / commit sha / 工单号），缺指针的先补再压；",
-    "   本次移出了什么、去了哪里，往 `LOG.md` 记一行。",
+    "   本次移出了什么、去了哪里，往 `LOG.md` 记一行。"
+    + "（体积自检：`python3 ../_shared/state_size_check.py <本项目>`，超 1 万字符非零退出。）",
     "",
     "## 项目事实（唯一事实源）",
     "- 跨专家共享的环境事实（端口 / 路径 / 数据源 / 机器拓扑 / 退役栈）只写在",
@@ -100,7 +107,7 @@ function projectStateTemplate(name: string): string {
   return [
     `# ${name} 当前状态`,
     "",
-    `（首次收工时更新；保持一页以内——接近 ${STATE_SOFT_CAP_LINES} 行按铁律 3 自行蒸馏收页）`,
+    `（首次收工时更新；保持一页以内——超过 ${STATE_SOFT_CAP_CHARS} 字符按铁律 3 自行蒸馏收页）`,
     "",
     "## 现状",
     "- 尚无记录",
@@ -237,9 +244,9 @@ export function expertStatus(paths: ExpertPaths, name: string): string {
       lines.push("  项目层:");
       for (const project of projects) {
         const zone = path.join(projectsDir, project.name);
-        const stateLines = fs.existsSync(path.join(zone, "STATE.md"))
-          ? fs.readFileSync(path.join(zone, "STATE.md"), "utf-8").split("\n").length : 0;
-        const fill = Math.min(100, Math.round((stateLines / STATE_SOFT_CAP_LINES) * 100));
+        const stateChars = fs.existsSync(path.join(zone, "STATE.md"))
+          ? fs.readFileSync(path.join(zone, "STATE.md"), "utf-8").length : 0;
+        const fill = Math.min(100, Math.round((stateChars / STATE_SOFT_CAP_CHARS) * 100));
         lines.push(`    · ${project.name}（STATE ${fill}%${fill >= 90 ? " ⚠️ 接近上限" : ""}）`);
       }
     }

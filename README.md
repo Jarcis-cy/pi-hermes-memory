@@ -265,14 +265,14 @@ Two budgets, deliberately different numbers:
 | Setting | Default | Bounds |
 |---|---|---|
 | `principleCharLimit` | 20000 | characters **injected per run** (the working set / attention budget) |
-| `principleStoreCharLimit` | 200000 | characters the layer may **hold** (the curation budget) |
+| `principleStoreCharLimit` | 400000 | characters the layer may **hold** (the curation budget) |
 
 Sharing one number is what deadlocked the layer in practice: a store larger than the
 injection budget (normal once omission exists) made every new addition fail as "over
 capacity". Storage stays bounded, injection stays small, and the gap is served by the
 index and by recall.
 
-The store default is deliberately generous (200k ≈ 57k tokens): two days of full-load
+The store default is deliberately generous (400k ≈ 110k tokens): two days of full-load
 distillation produced ~60k characters of genuinely distinct principles, and a tighter
 cap re-created the same deadlock one level up — every candidate became a "merge to make
 room" conflict while the model could not name merge targets. The cap exists to stop
