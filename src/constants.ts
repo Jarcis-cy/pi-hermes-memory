@@ -462,9 +462,11 @@ This tool is intentionally named 'skill_manage' because it manages saved procedu
 Use create for a new skill, patch for a targeted section update, update for a full rewrite, view to inspect existing skills, and delete to remove obsolete ones. When creating a skill, scope is required: use global for portable workflows and project for procedures tied to this repo's paths, scripts, architecture, deploy steps, or conventions.
 
 WHEN TO CREATE A SKILL:
-- After completing a complex task that required trial and error or multiple tool calls
-- When you discover a non-obvious approach that could be reused
-- When the user teaches you a specific workflow or procedure
+- The same procedure has been needed before (this is at least the second time you or another session hit it)
+- The user explicitly asks to save it as a skill
+- It is a recurring operational workflow (deploy, release, routine triage, periodic report)
+
+A single complex task, a one-off investigation, build, or delivery is NOT a skill: that know-how already lands in episodic memory and the expert's LOG/refs. Before creating, check whether an existing skill covers the same trigger and patch that one instead.
 
 SCOPE:
 - 'global': transferable procedures that can be reused across repositories. Written to ~/.pi/agent/pi-hermes-memory/skills/<slug>/SKILL.md, this extension's own directory, kept separate from skills the user installed themselves. Pi also loads its own ~/.pi/agent/skills/ first, so a name already used there is rejected rather than silently shadowed.

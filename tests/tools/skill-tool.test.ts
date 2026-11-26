@@ -527,3 +527,113 @@ describe("skill discovery wording (issue #244)", () => {
     await cleanup();
   });
 });
+
+describe("skill creation criteria (recurrence, not effort)", () => {
+  async function captureTool(): Promise<{ tool: any; store: SkillStore }> {
+    let captured: any;
+    const mockPi = {
+      registerTool: (def: any) => { captured = def; },
+    } as any;
+
+    const store = await makeStore();
+    registerSkillTool(mockPi, store);
+    return { tool: captured, store };
+  }
+
+  const EXISTING_DESCRIPTION = "Debug TypeScript build failures in this repo: tsc --noEmit errors, type-check failures in the workspace or CI.";
+
+  it("description states the recurrence criteria and no longer rewards completed effort", async () => {
+    const { tool } = await captureTool();
+    const text: string = tool.description;
+
+    assert.match(text, /The same procedure has been needed before/);
+    assert.match(text, /The user explicitly asks to save it as a skill/);
+    assert.match(text, /recurring operational workflow \(deploy, release, routine triage, periodic report\)/);
+    assert.match(text, /A single complex task, a one-off investigation, build, or delivery is NOT a skill/);
+    assert.match(text, /check whether an existing skill covers the same trigger and patch that one instead/);
+
+    assert.doesNotMatch(text, /After completing a complex task that required trial and error/);
+    assert.doesNotMatch(text, /When you discover a non-obvious approach that could be reused/);
+    assert.doesNotMatch(text, /When the user teaches you a specific workflow or procedure/);
+
+    const guidelines: string[] = tool.promptGuidelines;
+    assert.ok(
+      guidelines.some((g) => /Create a skill only when the same procedure recurs/.test(g)),
+      "the guideline must ask for recurrence, not for effort",
+    );
+    assert.ok(
+      !guidelines.some((g) => /after completing complex tasks that required trial and error/.test(g)),
+      "the old effort-based sentence must be gone",
+    );
+
+    await cleanup();
+  });
+
+  it("refuses create when the description restates a visible skill, and writes nothing", async () => {
+    const { tool, store } = await captureTool();
+    await store.create("debug-typescript-errors", EXISTING_DESCRIPTION, "## Procedure\n1. Run tsc --noEmit", "global");
+
+    const result = await tool.execute("tc-1", {
+      action: "create",
+      name: "debug-ts-build",
+      description: "Debug TypeScript build failures in this repo: tsc --noEmit errors and type-check failures.",
+      scope: "global",
+      content: "## Procedure\n1. Run tsc --noEmit",
+    }, undefined, undefined, undefined);
+
+    const parsed = JSON.parse(result.content[0].text);
+    assert.strictEqual(parsed.success, false);
+    assert.strictEqual(parsed.ok, false);
+    assert.match(parsed.error, /similarity 0\.\d\d/);
+    assert.match(parsed.error, /debug-typescript-errors/);
+    assert.match(parsed.error, /SKILL\.md/);
+    assert.match(parsed.error, /Patch or update that skill/);
+
+    assert.equal((await store.loadIndex()).length, 1, "a rejected create must not add a row");
+    await assert.rejects(
+      fs.access(path.join(GLOBAL_SKILLS_DIR, "debug-ts-build")),
+      "a rejected create must not write a file",
+    );
+
+    await cleanup();
+  });
+
+  it("allows create when nothing similar is visible", async () => {
+    const { tool, store } = await captureTool();
+    await store.create("debug-typescript-errors", EXISTING_DESCRIPTION, "## Procedure\n1. Run tsc --noEmit", "global");
+
+    const result = await tool.execute("tc-1", {
+      action: "create",
+      name: "rotate-deploy-keys",
+      description: "Rotate production deploy keys and verify the expiry schedule afterwards.",
+      scope: "global",
+      content: "## Procedure\n1. Rotate the key pair",
+    }, undefined, undefined, undefined);
+
+    const parsed = JSON.parse(result.content[0].text);
+    assert.strictEqual(parsed.success, true);
+    assert.equal((await store.loadIndex()).length, 2);
+
+    await cleanup();
+  });
+
+  it("refuses create when the name already exists, ignoring case", async () => {
+    const { tool, store } = await captureTool();
+    await store.create("release-app", "Release this app with the standard pipeline.", "## Procedure\n1. Tag", "global");
+
+    const result = await tool.execute("tc-1", {
+      action: "create",
+      name: "Release-App",
+      description: "A completely different concern about database backups.",
+      scope: "global",
+      content: "## Procedure\n1. Do something else",
+    }, undefined, undefined, undefined);
+
+    const parsed = JSON.parse(result.content[0].text);
+    assert.strictEqual(parsed.success, false);
+    assert.match(parsed.error, /already uses this name/);
+    assert.equal((await store.loadIndex()).length, 1, "the same name must not produce a second row");
+
+    await cleanup();
+  });
+});

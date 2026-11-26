@@ -8,6 +8,8 @@ import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { SkillStore } from "../store/skill-store.js";
 import { SKILL_TOOL_DESCRIPTION } from "../constants.js";
+import { tokenSetSimilarity } from "../store/text-similarity.js";
+import { slugify } from "../store/skill-utils.js";
 import { createSharedToolResultRenderer } from "./shared-output-view.js";
 import { skillResultView } from "./tool-result-views.js";
 
@@ -26,6 +28,70 @@ function formatOrderedList(items: string[]): string {
 function formatBulletList(items: string[], fallback: string): string {
   if (items.length === 0) return `- ${fallback}`;
   return items.map((item) => `- ${item}`).join("\n");
+}
+
+/** Similarity at or above this means the new skill restates an existing one:
+ * the agent is about to write a second copy of a procedure it already has. */
+const SKILL_DUPLICATE_SIMILARITY_THRESHOLD = 0.5;
+
+/** Match text for the duplicate gate: the name carries the trigger, the
+ * description carries the discovery signals Pi indexes on. Both are compared so
+ * either kind of copy — renamed twin, or same trigger reworded — is caught. */
+function skillMatchText(name: string, description: string): string {
+  return `${name}\n${description}`;
+}
+
+interface DuplicateSkillHit {
+  skill: { skillId: string; scope: string; name: string; displayName?: string; path: string };
+  similarity: number;
+  nameCollision: boolean;
+}
+
+/**
+ * Is `name` + `description` already covered by a visible skill?
+ *
+ * Creation used to be judged by how hard the finished task felt, so 189 of 271
+ * self-built skills were never opened again. The durable question is whether the
+ * procedure will recur, and the cheapest evidence for that is a skill that already
+ * exists: an identical name (ignoring case), or a description close enough that
+ * this is the same trigger stated twice. Visible = every scope the store lists
+ * (project + global), because a project workflow duplicating a global skill is the
+ * same waste as duplicating it inside one scope.
+ */
+async function findDuplicateSkill(
+  store: SkillStore,
+  name: string,
+  description: string,
+): Promise<DuplicateSkillHit | null> {
+  const index = await store.loadIndex();
+  const candidateName = name.trim().toLowerCase();
+  const candidateSlug = slugify(name);
+  const candidateText = skillMatchText(name, description);
+
+  for (const skill of index) {
+    const names = [skill.name, skill.displayName ?? ""].map((value) => value.trim().toLowerCase()).filter(Boolean);
+    if (names.includes(candidateName) || (candidateSlug && skill.name === candidateSlug)) {
+      return { skill, similarity: 1, nameCollision: true };
+    }
+  }
+
+  let best: DuplicateSkillHit | null = null;
+  for (const skill of index) {
+    const similarity = tokenSetSimilarity(candidateText, skillMatchText(skill.displayName || skill.name, skill.description));
+    if (similarity < SKILL_DUPLICATE_SIMILARITY_THRESHOLD) continue;
+    if (!best || similarity > best.similarity) best = { skill, similarity, nameCollision: false };
+  }
+  return best;
+}
+
+function duplicateSkillError(hit: DuplicateSkillHit): string {
+  const skill = hit.skill;
+  const label = skill.displayName || skill.name;
+  const reason = hit.nameCollision
+    ? `skill '${label}' already uses this name`
+    : `skill '${label}' is ${(hit.similarity * 100).toFixed(0)}% similar (similarity ${hit.similarity.toFixed(2)})`;
+  return `Not created: ${reason} — ${skill.skillId} at ${skill.path}.`
+    + " Patch or update that skill instead of creating a second copy; create is for a procedure that recurs and is not covered yet.";
 }
 
 function buildStructuredSkillBody(
@@ -96,7 +162,7 @@ export function registerSkillTool(pi: ExtensionAPI, store: SkillStore): void {
     description: SKILL_TOOL_DESCRIPTION,
     promptSnippet: "Create, inspect, and update reusable procedures and patterns",
     promptGuidelines: [
-      "Use the skill_manage tool after completing complex tasks that required trial and error or multiple tool calls.",
+      "Create a skill only when the same procedure recurs, the user asks for it, or it is a recurring operational workflow — see WHEN TO CREATE A SKILL.",
       "Use 'create' to save a new reusable procedure, 'patch' to update a section of an existing skill by skill_id, and 'update' for a full rewrite.",
       "Scope is required on create: choose scope='global' for transferable procedures and scope='project' when the workflow depends on this repo's paths, scripts, conventions, or deploy steps.",
       "Prefer structured fields for create/update/patch: when_to_use, procedure_steps, pitfalls, and verification_steps. The tool renders valid SKILL.md sections for you. Put the trigger signals a user would type in 'description' — Pi indexes skills by that field alone.",
@@ -188,6 +254,21 @@ export function registerSkillTool(pi: ExtensionAPI, store: SkillStore): void {
             return {
               content: [{ type: "text", text: JSON.stringify({ success: false, error: "scope is required for 'create' action. Use 'global' or 'project'." }) }],
               details: {},
+            };
+          }
+          const duplicate = await findDuplicateSkill(store, name, description);
+          if (duplicate) {
+            const rejection = {
+              success: false,
+              ok: false,
+              error: duplicateSkillError(duplicate),
+              conflictType: "duplicate",
+              similarSkillIds: [duplicate.skill.skillId],
+              suggestedAction: "patch",
+            };
+            return {
+              content: [{ type: "text", text: JSON.stringify(rejection) }],
+              details: rejection,
             };
           }
           result = await store.create(name, description, createBodyResult.body, scope);
