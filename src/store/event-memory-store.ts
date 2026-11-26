@@ -1557,6 +1557,8 @@ function addPrincipleInTransaction(
   /** Set when the text looks like a reworded copy of this active principle. */
   restatementOf?: number;
   restatementSimilarity?: number;
+  /** The restated principle lives in another scope: merging is not automatic. */
+  restatementCrossScope?: boolean;
   overCapacity?: boolean;
   error?: string;
 } {
@@ -1613,8 +1615,19 @@ function addPrincipleInTransaction(
   if (!options.skipRestatementCheck && supersedesIds.length === 0) {
     const crossScopeTwin = findCrossScopeRestatement(db, { scope: input.scope, project, content });
     if (crossScopeTwin) {
-      linkPrincipleSources(db, crossScopeTwin.id, input.sourceEventIds);
-      return { duplicateId: crossScopeTwin.id };
+      // Same two bands as the same-scope gate: near-identical wording is the same
+      // rule stated twice (absorb); merely similar wording may carry a new clause
+      // ("verified" vs "verified except docs-only changes") and parking it is the
+      // only lossless option. Absorbing the whole band silently drops that clause.
+      if (crossScopeTwin.similarity >= PRINCIPLE_NEAR_DUPLICATE_THRESHOLD) {
+        linkPrincipleSources(db, crossScopeTwin.id, input.sourceEventIds);
+        return { duplicateId: crossScopeTwin.id };
+      }
+      return {
+        restatementOf: crossScopeTwin.id,
+        restatementSimilarity: crossScopeTwin.similarity,
+        restatementCrossScope: true,
+      };
     }
   }
 
@@ -1927,7 +1940,8 @@ export function applyConcretionPlan(
           conflictingPrincipleIds: relevantExistingIds,
           sourceEventIds,
           reason: `Possible restatement of P${added.restatementOf}`
-            + ` (similarity ${added.restatementSimilarity?.toFixed(2)}): merge it into P${added.restatementOf},`
+            + ` (similarity ${added.restatementSimilarity?.toFixed(2)}`
+            + `${added.restatementCrossScope ? ", in another scope" : ""}): merge it into P${added.restatementOf},`
             + " keep it separate with `distinct`, or reject it.",
         });
         result.conflicts++;
@@ -2103,12 +2117,17 @@ export function resolvePrincipleConflict(
   if (outcome.restatementOf) {
     // Actionable on purpose: the plain accept would hit the same gate again, so
     // name the exact command that overrides it (#restatement-dead-end).
+    const keepBothHint = `/memory-conflicts ${conflictId} ${decision === "keep_both" ? "both" : "accept"} distinct`;
     return {
       success: false,
       message: `This candidate looks like a restatement of P${outcome.restatementOf}`
-        + ` (similarity ${outcome.restatementSimilarity?.toFixed(2)}). Merge it with /memory-concretize,`
-        + ` or keep it separate with /memory-conflicts ${conflictId} ${decision === "keep_both" ? "both" : "accept"} distinct`
-        + " (or reject it).",
+        + ` (similarity ${outcome.restatementSimilarity?.toFixed(2)}). `
+        + (outcome.restatementCrossScope
+          // /memory-concretize only offers same-scope merge pairs, so naming it here
+          // would send the user into a dead end twice.
+          ? `That principle lives in another scope, so merging is not automatic: fold the nuance into`
+            + ` P${outcome.restatementOf} by hand and reject this candidate, or keep both with ${keepBothHint}.`
+          : `Merge it with /memory-concretize, or keep it separate with ${keepBothHint} (or reject it).`),
     };
   }
   if (outcome.overCapacity) {

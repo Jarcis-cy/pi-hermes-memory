@@ -617,6 +617,45 @@ describe("skill creation criteria (recurrence, not effort)", () => {
     await cleanup();
   });
 
+  it("refuses create when the slug of the name already exists, ignoring separators", async () => {
+    const { tool, store } = await captureTool();
+    await store.create("deploy-app", "Deploy this app with the standard pipeline.", "## Procedure\n1. Tag", "global");
+
+    const result = await tool.execute("tc-1", {
+      action: "create",
+      name: "Deploy App",
+      description: "Something about cache warmup that is not the deploy pipeline at all.",
+      scope: "global",
+      content: "## Procedure\n1. Warm the cache",
+    }, undefined, undefined, undefined);
+
+    const parsed = JSON.parse(result.content[0].text);
+    assert.strictEqual(parsed.success, false, "'deploy app' and 'deploy-app' are one skill name");
+    assert.match(parsed.error, /already uses this name/);
+    assert.equal((await store.loadIndex()).length, 1);
+
+    await cleanup();
+  });
+
+  it("refuses create when a project skill collides with a global one", async () => {
+    const { tool, store } = await captureTool();
+    await store.create("weekly-report", "Weekly owner report: gather commits, tickets and H1 statistics.", "## Procedure\n1. Collect", "global");
+
+    const result = await tool.execute("tc-1", {
+      action: "create",
+      name: "weekly-report",
+      description: "Compose the weekly summary for the team.",
+      scope: "project",
+      content: "## Procedure\n1. Draft",
+    }, undefined, undefined, undefined);
+
+    const parsed = JSON.parse(result.content[0].text);
+    assert.strictEqual(parsed.success, false, "a project copy of a global procedure is the same waste");
+    assert.equal((await store.loadIndex()).length, 1);
+
+    await cleanup();
+  });
+
   it("refuses create when the name already exists, ignoring case", async () => {
     const { tool, store } = await captureTool();
     await store.create("release-app", "Release this app with the standard pipeline.", "## Procedure\n1. Tag", "global");

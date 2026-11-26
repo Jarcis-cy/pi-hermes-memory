@@ -1112,6 +1112,80 @@ describe("event-memory-store", () => {
     );
   });
 
+  it("parks a cross-scope restatement that carries extra nuance instead of absorbing it", () => {
+    const first = captureMemoryEvents(dbManager, [{ scope: "global", kind: "outcome", content: "Fix verified by rerunning the repro." }], {
+      captureId: "cross-band-1", source: "manual",
+    });
+    const run1 = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run1, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "global",
+      content: "A fix is verified when the failing repro now passes.",
+      rationale: "Verification habit.",
+      sourceEventIds: first.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 200000 });
+    assert.equal(getActivePrinciples(dbManager).length, 1);
+
+    // 0.67 相似：同一条规则，但候选多了一个边界条件（仅文档改动除外）。
+    // 静默吸收会把这条边界条件丢掉，所以这一档要和同范围一样"停车待裁决"。
+    const second = captureMemoryEvents(dbManager, [{
+      scope: "project", kind: "outcome", content: "Docs-only change shipped without rerunning the repro.",
+    }], { captureId: "cross-band-2", source: "manual", project: "alpha" });
+    const run2 = startConcretionRun(dbManager, "manual", 1);
+    const applied = applyConcretionPlan(dbManager, run2, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "project",
+      content: "A fix is verified when the failing repro now passes, except documentation-only changes.",
+      rationale: "Same rule plus one boundary condition.",
+      sourceEventIds: second.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 200000 });
+
+    assert.equal(applied.added, 0, "no second copy in another scope");
+    assert.equal(applied.reinforced, 0, "a nuance-bearing near copy is not silently absorbed");
+    assert.equal(applied.conflicts, 1, "it parks for one decision");
+    const [conflict] = getPendingPrincipleConflicts(dbManager);
+    assert.match(String(conflict?.reason), /another scope/);
+    assert.match(String(conflict?.reason), /Possible restatement of P\d+/);
+    assert.equal(getActivePrinciples(dbManager).length, 1, "only the original rule remains active");
+  });
+
+  it("never treats another project's principle as a restatement target", () => {
+    const beta = captureMemoryEvents(dbManager, [{ scope: "project", kind: "failure", content: "Beta lost its adapter config." }], {
+      captureId: "other-project-1", source: "manual", project: "beta",
+    });
+    const run1 = startConcretionRun(dbManager, "manual", 1);
+    applyConcretionPlan(dbManager, run1, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "project",
+      content: "Check the adapter config path before wiring a boundary.",
+      rationale: "Beta lesson.",
+      sourceEventIds: beta.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 200000 });
+
+    const alpha = captureMemoryEvents(dbManager, [{ scope: "project", kind: "failure", content: "Alpha lost its adapter config." }], {
+      captureId: "other-project-2", source: "manual", project: "alpha",
+    });
+    const run2 = startConcretionRun(dbManager, "manual", 1);
+    const applied = applyConcretionPlan(dbManager, run2, getMemoryEvents(dbManager, { pendingOnly: true }), [{
+      action: "add",
+      scope: "project",
+      content: "Check the adapter config path before wiring a boundary.",
+      rationale: "Alpha lesson, same words.",
+      sourceEventIds: alpha.eventIds,
+      existingPrincipleIds: [],
+    }], { charLimit: 200000 });
+
+    assert.equal(applied.added, 1, "a principle may only absorb evidence from its own project");
+    const alphaRow = getActivePrinciples(dbManager, "alpha").find((row) => row.project === "alpha");
+    const betaRow = getActivePrinciples(dbManager, "beta").find((row) => row.project === "beta");
+    assert.ok(alphaRow && betaRow, "both projects keep their own rule");
+    assert.deepEqual([...betaRow!.sourceEventIds].sort((a, b) => a - b), [...beta.eventIds].sort((a, b) => a - b),
+      "the other project's evidence must not be attached");
+  });
+
   it("lets the user keep a possible restatement separate instead of a dead end", () => {
     const first = captureMemoryEvents(dbManager, [{ scope: "global", kind: "failure", content: "Adapter wiring failed." }], {
       captureId: "distinct-1", source: "manual",
